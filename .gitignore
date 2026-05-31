@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+local.properties
+
+# NDK / CMake build caches
+app/.cxx/
+**/.externalNativeBuild/
+**/cmake-build-*/
+
+# Compiled native artifacts
+*.so
+*.o
+*.a
+*.d
+
+# APKs and bundles
+*.apk
+*.aab
+
+# Proguard / R8 mapping files
+*.map
+
+# OS files
+.DS_Store
+Thumbs.db
