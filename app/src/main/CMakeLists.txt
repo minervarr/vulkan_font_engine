@@ -8,7 +8,7 @@ set(NATIVE_APP_GLUE ${ANDROID_NDK}/sources/android/native_app_glue)
 # Override with: cmake -DFREETYPE_SOURCE_DIR=/your/path/to/freetype-src
 if(NOT DEFINED FREETYPE_SOURCE_DIR)
     set(FREETYPE_SOURCE_DIR
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../whisper_cpp_ui_android/thirdPartyCode_OnlyReference/freetype"
+        "${CMAKE_CURRENT_SOURCE_DIR}/freetype"
         CACHE PATH "Path to FreeType source directory")
 endif()
 
