@@ -292,14 +292,14 @@ const GlyphDef* lookup(char c) {
 }
 
 void pushCurve(std::vector<float>& out,
-               float type, float a, float b, float c, float d,
+               float type, float a, float b, float c, float d, float e,
                float r, float g, float bb, float aa, float lineWidth,
                float minX, float minY, float maxX, float maxY) {
   size_t n = out.size();
   out.resize(n + Renderer::CURVE_FLOATS, 0.0f);
   // [0-4]: type + params (a,b,c,d); [5-8]: reserved for cubic P2/P3 (stay 0)
   out[n+ 0] = type; out[n+ 1] = a;   out[n+ 2] = b;   out[n+ 3] = c;
-  out[n+ 4] = d;
+  out[n+ 4] = d;    out[n+ 5] = e;
   // [9-12]: RGBA color
   out[n+ 9] = r;   out[n+10] = g;   out[n+11] = bb;  out[n+12] = aa;
   // [13]: lineWidth; [14-17]: bounding box
@@ -311,8 +311,8 @@ void pushCurve(std::vector<float>& out,
 
 void emitFilledRect(std::vector<float>& out,
                     float cx, float cy, float halfW, float halfH,
-                    float r, float g, float b, float a) {
-  pushCurve(out, 2.0f, cx, cy, halfW, halfH, r, g, b, a, 0.0f,
+                    float r, float g, float b, float a, float radius) {
+  pushCurve(out, 2.0f, cx, cy, halfW, halfH, radius, r, g, b, a, 0.0f,
             cx-halfW-1.0f, cy-halfH-1.0f, cx+halfW+1.0f, cy+halfH+1.0f);
 }
 
@@ -321,7 +321,7 @@ void emitLineSegment(std::vector<float>& out,
                      float lineWidth,
                      float r, float g, float b, float a) {
   float pad = lineWidth + 1.5f;
-  pushCurve(out, 3.0f, x0, y0, x1, y1, r, g, b, a, lineWidth,
+  pushCurve(out, 3.0f, x0, y0, x1, y1, 0.0f, r, g, b, a, lineWidth,
             std::min(x0,x1)-pad, std::min(y0,y1)-pad,
             std::max(x0,x1)+pad, std::max(y0,y1)+pad);
 }
@@ -350,16 +350,16 @@ float glyphAdvance(char c, float scale) {
 }
 
 void emitString(std::vector<float>& out,
-                const char* str, float x, float y, float scale, float lineWidth,
+                std::string_view str, float x, float y, float scale, float lineWidth,
                 float r, float g, float b, float a) {
-  for (const char* p = str; *p; p++) {
-    if (*p != ' ') emitGlyph(out, *p, x, y, scale, lineWidth, r, g, b, a);
-    x += glyphAdvance(*p, scale);
+  for (char p : str) {
+    if (p != ' ') emitGlyph(out, p, x, y, scale, lineWidth, r, g, b, a);
+    x += glyphAdvance(p, scale);
   }
 }
 
-float stringWidth(const char* str, float scale) {
+float stringWidth(std::string_view str, float scale) {
   float w = 0.0f;
-  for (const char* p = str; *p; p++) w += glyphAdvance(*p, scale);
+  for (char p : str) w += glyphAdvance(p, scale);
   return w;
 }

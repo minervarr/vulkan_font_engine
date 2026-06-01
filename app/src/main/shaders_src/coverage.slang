@@ -54,24 +54,30 @@ float cubicEval(float p0, float p1, float p2, float p3, float t) {
 // Horizontal segment from (xa,ya) to (xb,yb), monotonic in y, crosses the ray
 // at fpy iff its endpoints straddle fpy under the half-open rule.  Returns the
 // signed crossing if the intersection lies to the right of fpx.
-int segCrossLine(float xa, float ya, float xb, float yb, float fpx, float fpy) {
+// Each winding helper also reports, via nearestX, the X of its closest crossing
+// strictly to the right of fpx (or leaves nearestX untouched if none). The fill
+// colour is taken from the curve owning that nearest crossing — i.e. the right
+// edge of the glyph the pixel actually sits in — so colour can't bleed in from
+// glyphs further along the same text row.
+int segCrossLine(float xa, float ya, float xb, float yb,
+                 float fpx, float fpy, inout float nearestX) {
   bool a = ya > fpy;
   bool b = yb > fpy;
   if (a == b) return 0;
   float t  = (fpy - ya) / (yb - ya);
   float xi = xa + t * (xb - xa);
-  if (xi > fpx) return (yb > ya) ? 1 : -1;
+  if (xi > fpx) { nearestX = min(nearestX, xi); return (yb > ya) ? 1 : -1; }
   return 0;
 }
 
-int windingContribLine(uint base, float fpx, float fpy) {
+int windingContribLine(uint base, float fpx, float fpy, inout float nearestX) {
   return segCrossLine(curves[base+1], curves[base+2],
-                      curves[base+3], curves[base+4], fpx, fpy);
+                      curves[base+3], curves[base+4], fpx, fpy, nearestX);
 }
 
 // ── Quadratic Bézier ─────────────────────────────────────────────────────────
 
-int windingContribQuadratic(uint base, float fpx, float fpy) {
+int windingContribQuadratic(uint base, float fpx, float fpy, inout float nearestX) {
   float x0 = curves[base+1], y0 = curves[base+2];
   float x1 = curves[base+3], y1 = curves[base+4];
   float x2 = curves[base+5], y2 = curves[base+6];
@@ -102,14 +108,14 @@ int windingContribQuadratic(uint base, float fpx, float fpy) {
     }
     float tc = 0.5*(lo+hi);
     float xi = quadEvalY(x0, x1, x2, tc);       // same basis works for x
-    if (xi > fpx) w += (yb > ya) ? 1 : -1;
+    if (xi > fpx) { nearestX = min(nearestX, xi); w += (yb > ya) ? 1 : -1; }
   }
   return w;
 }
 
 // ── Cubic Bézier ─────────────────────────────────────────────────────────────
 
-int windingContribCubic(uint base, float fpx, float fpy) {
+int windingContribCubic(uint base, float fpx, float fpy, inout float nearestX) {
   float x0 = curves[base+1], y0 = curves[base+2];
   float x1 = curves[base+3], y1 = curves[base+4];
   float x2 = curves[base+5], y2 = curves[base+6];
@@ -155,7 +161,7 @@ int windingContribCubic(uint base, float fpx, float fpy) {
     }
     float tc = 0.5*(lo+hi);
     float xi = cubicEval(x0, x1, x2, x3, tc);
-    if (xi > fpx) w += (yb > ya) ? 1 : -1;
+    if (xi > fpx) { nearestX = min(nearestX, xi); w += (yb > ya) ? 1 : -1; }
   }
   return w;
 }
@@ -179,9 +185,9 @@ float evaluateCurve(uint curveIndex, float fpx, float fpy)
     result = fpy - (a * fpx * fpx + b * fpx + c);
   };
   if (type == 2u) {
-    float dx = abs(fpx - a) - c;
-    float dy = abs(fpy - b) - d;
-    result = max(dx, dy);
+    float radius = curves[base + 5];
+    float2 d = float2(abs(fpx - a) - c + radius, abs(fpy - b) - d + radius);
+    result = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
   };
   if (type == 3u) {
     float2 pp = float2(fpx, fpy);
@@ -263,6 +269,7 @@ float4 shadePixel(uint px, uint py, float fpx, float fpy)
 
     int    totalWinding = 0;
     float4 windingColor = float4(1.0, 1.0, 1.0, 1.0);
+    float  nearestX     = 1e30;   // X of the closest crossing right of the pixel
 
     for (uint tx = pixelTx; tx < push.tileCountX; tx++) {
       uint cellOffset = (ty * push.tileCountX + tx) * WIND_STRIDE;
@@ -278,16 +285,22 @@ float4 shadePixel(uint px, uint py, float fpx, float fpy)
         if (fpy < curves[base+15] || fpy > curves[base+17] ||
             curves[base+16] <= fpx) continue;
 
-        uint ciType  = uint(curves[base]);
-        int  contrib = 0;
-        if (ciType == 4u) contrib = windingContribCubic(base, fpx, fpy);
-        if (ciType == 5u) contrib = windingContribQuadratic(base, fpx, fpy);
-        if (ciType == 6u) contrib = windingContribLine(base, fpx, fpy);
+        uint  ciType  = uint(curves[base]);
+        float curveNearX = 1e30;
+        int   contrib = 0;
+        if (ciType == 4u) contrib = windingContribCubic(base, fpx, fpy, curveNearX);
+        if (ciType == 5u) contrib = windingContribQuadratic(base, fpx, fpy, curveNearX);
+        if (ciType == 6u) contrib = windingContribLine(base, fpx, fpy, curveNearX);
         if (contrib != 0) {
           totalWinding += contrib;
-          // Color of the last curve that actually contributed a crossing.
-          windingColor = float4(curves[base+9],  curves[base+10],
-                                curves[base+11], curves[base+12]);
+          // Adopt the colour of the curve whose crossing is closest to the
+          // right of the pixel — that is the right edge of the glyph the pixel
+          // belongs to, so adjacent glyphs of other colours don't bleed in.
+          if (curveNearX < nearestX) {
+            nearestX = curveNearX;
+            windingColor = float4(curves[base+9],  curves[base+10],
+                                  curves[base+11], curves[base+12]);
+          }
         }
       }
     }
@@ -318,7 +331,7 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID)
 
   if (px >= push.screenWidth || py >= push.screenHeight) return;
 
-  const uint SS = 4u;   // sub-samples per axis (4x4 = 16 samples)
+  const uint SS = 2u;   // sub-samples per axis (2x2 = 4 samples)
   float4 acc = float4(0.0, 0.0, 0.0, 0.0);
   for (uint sy = 0u; sy < SS; sy++) {
     for (uint sx = 0u; sx < SS; sx++) {

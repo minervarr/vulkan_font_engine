@@ -3,6 +3,8 @@
 #include <android/asset_manager.h>
 #include <cstdint>
 
+class MsdfFont;
+
 struct Renderer {
   static constexpr uint32_t MAX_CURVES          = 8192;
   static constexpr uint32_t CURVE_FLOATS        = 20;
@@ -46,6 +48,25 @@ struct Renderer {
   VkPipeline       tilingPipeline        = VK_NULL_HANDLE;
   VkPipeline       coveragePipeline      = VK_NULL_HANDLE;
 
+  // MSDF resources
+  VkImage          msdfAtlasImage   = VK_NULL_HANDLE;
+  VkDeviceMemory   msdfAtlasMemory  = VK_NULL_HANDLE;
+  VkImageView      msdfAtlasView    = VK_NULL_HANDLE;
+  VkSampler        msdfSampler      = VK_NULL_HANDLE;
+  VkBuffer         msdfStaging      = VK_NULL_HANDLE;
+  VkDeviceMemory   msdfStagingMem   = VK_NULL_HANDLE;
+  VkBuffer         msdfVertBuffer   = VK_NULL_HANDLE;
+  VkDeviceMemory   msdfVertMemory   = VK_NULL_HANDLE;
+  void*            msdfVertMapped   = nullptr;
+  VkDescriptorSetLayout msdfSetLayout = VK_NULL_HANDLE;
+  VkDescriptorPool      msdfPool      = VK_NULL_HANDLE;
+  VkDescriptorSet       msdfSet       = VK_NULL_HANDLE;
+  VkPipelineLayout msdfPipelineLayout = VK_NULL_HANDLE;
+  VkPipeline       msdfPipeline       = VK_NULL_HANDLE;
+  uint32_t         msdfAtlasW = 0, msdfAtlasH = 0;
+  float            msdfPxRange = 4.0f;
+  uint32_t         msdfVertCount = 0;
+
   void init(VkDevice dev, VkPhysicalDevice phyDev, AAssetManager* mgr,
             uint32_t width, uint32_t height);
   void cleanup();
@@ -54,6 +75,27 @@ struct Renderer {
 
   void transitionOutputImageInitial(VkCommandBuffer cmd);
   void dispatch(VkCommandBuffer cmd);
+
+  // ── MSDF text path ─────────────────────────────────────────────────────────
+  // Crisp, cheap text via an offline MSDF atlas (Chlumsky). Glyphs are drawn as
+  // textured quads in the app's render pass, bypassing the Bézier coverage pass.
+  static constexpr uint32_t MAX_MSDF_VERTS  = 96000;  // 16000 glyphs * 6 verts
+  static constexpr uint32_t MSDF_VERT_FLOATS = 8;     // pos.xy uv.xy rgba
+
+  // Creates the atlas image/sampler, descriptor, vertex buffer and graphics
+  // pipeline. Call after the render pass exists and the font is loaded.
+  void createMsdfResources(VkRenderPass renderPass, const MsdfFont& font);
+  // Records the one-time atlas upload (staging -> device image) into an init
+  // command buffer that the caller submits and waits on.
+  void recordAtlasUpload(VkCommandBuffer cmd);
+  bool msdfReady() const { return msdfPipeline != VK_NULL_HANDLE; }
+  void uploadGlyphQuads(const float* verts, uint32_t vertCount);
+  uint32_t msdfVerts() const { return msdfVertCount; }
+  // Draw a sub-range of the uploaded glyph quads with a scroll offset (px) and a
+  // scissor rectangle (px). The geometry is static; scrolling is just the offset.
+  void drawMsdfRange(VkCommandBuffer cmd, uint32_t firstVert, uint32_t vertCount,
+                     float scrollX, float scrollY,
+                     int32_t sx, int32_t sy, uint32_t sw, uint32_t sh);
 
  private:
   void createDescriptorLayoutAndPool();
