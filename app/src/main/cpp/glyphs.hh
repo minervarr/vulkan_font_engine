@@ -1,9 +1,10 @@
 #pragma once
 #include <vector>
+#include <string_view>
 
 void emitFilledRect(std::vector<float>& out,
                     float cx, float cy, float halfW, float halfH,
-                    float r, float g, float b, float a);
+                    float r, float g, float b, float a, float radius = 0.0f);
 
 void emitLineSegment(std::vector<float>& out,
                      float x0, float y0, float x1, float y1,
@@ -20,7 +21,7 @@ float glyphAdvance(char c, float scale);
 
 // Convenience: emit a whole string left-to-right starting at (x, y).
 void emitString(std::vector<float>& out,
-                const char* str, float x, float y, float scale, float lineWidth,
+                std::string_view str, float x, float y, float scale, float lineWidth,
                 float r, float g, float b, float a);
 
-float stringWidth(const char* str, float scale);
+float stringWidth(std::string_view str, float scale);

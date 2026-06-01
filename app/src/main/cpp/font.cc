@@ -282,17 +282,17 @@ float Font::glyphAdvance(char c, float scale) const {
            / (float)face->units_per_EM * scale;
 }
 
-float Font::stringWidth(const char* str, float scale) const {
+float Font::stringWidth(std::string_view str, float scale) const {
     float w = 0.0f;
-    for (const char* p = str; *p; p++) w += glyphAdvance(*p, scale);
+    for (char p : str) w += glyphAdvance(p, scale);
     return w;
 }
 
 void Font::emitString(std::vector<float>& out,
-                      const char* str, float x, float y, float scale,
+                      std::string_view str, float x, float y, float scale,
                       float r, float g, float b, float a) const {
-    for (const char* p = str; *p; p++) {
-        if (*p != ' ') emitGlyph(out, *p, x, y, scale, r, g, b, a);
-        x += glyphAdvance(*p, scale);
+    for (char p : str) {
+        if (p != ' ') emitGlyph(out, p, x, y, scale, r, g, b, a);
+        x += glyphAdvance(p, scale);
     }
 }

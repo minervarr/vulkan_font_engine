@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include <string_view>
 
 struct Font {
     void* ftLibrary = nullptr;
@@ -25,9 +26,9 @@ struct Font {
                   float r, float g, float b, float a) const;
 
     float glyphAdvance(char c, float scale) const;
-    float stringWidth(const char* str, float scale) const;
+    float stringWidth(std::string_view str, float scale) const;
 
     void emitString(std::vector<float>& out,
-                    const char* str, float x, float y, float scale,
+                    std::string_view str, float x, float y, float scale,
                     float r, float g, float b, float a) const;
 };

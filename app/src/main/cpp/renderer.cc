@@ -1,4 +1,5 @@
 #include "renderer.hh"
+#include "msdf.hh"
 #include <android/log.h>
 #include <cstring>
 #include <vector>
@@ -530,6 +531,303 @@ void Renderer::dispatch(VkCommandBuffer cmd) {
   }
 }
 
+// ── MSDF text path ───────────────────────────────────────────────────────────
+
+void Renderer::createMsdfResources(VkRenderPass renderPass, const MsdfFont& font) {
+  if (!font.valid()) { LOGE("MSDF font invalid; skipping MSDF setup"); return; }
+  msdfAtlasW  = font.atlasW();
+  msdfAtlasH  = font.atlasH();
+  msdfPxRange = font.distanceRange();
+
+  // Atlas image (device-local, sampled).
+  VkImageCreateInfo img{};
+  img.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+  img.imageType     = VK_IMAGE_TYPE_2D;
+  img.format        = VK_FORMAT_R8G8B8A8_UNORM;
+  img.extent        = {msdfAtlasW, msdfAtlasH, 1};
+  img.mipLevels     = 1;
+  img.arrayLayers   = 1;
+  img.samples       = VK_SAMPLE_COUNT_1_BIT;
+  img.tiling        = VK_IMAGE_TILING_OPTIMAL;
+  img.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  img.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  vkCreateImage(device, &img, nullptr, &msdfAtlasImage);
+
+  VkMemoryRequirements ir{};
+  vkGetImageMemoryRequirements(device, msdfAtlasImage, &ir);
+  VkMemoryAllocateInfo ia{};
+  ia.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  ia.allocationSize  = ir.size;
+  ia.memoryTypeIndex = findMemoryType(ir.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  vkAllocateMemory(device, &ia, nullptr, &msdfAtlasMemory);
+  vkBindImageMemory(device, msdfAtlasImage, msdfAtlasMemory, 0);
+
+  VkImageViewCreateInfo iv{};
+  iv.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+  iv.image            = msdfAtlasImage;
+  iv.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+  iv.format           = VK_FORMAT_R8G8B8A8_UNORM;
+  iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  vkCreateImageView(device, &iv, nullptr, &msdfAtlasView);
+
+  VkSamplerCreateInfo sm{};
+  sm.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+  sm.magFilter    = VK_FILTER_LINEAR;
+  sm.minFilter    = VK_FILTER_LINEAR;
+  sm.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  sm.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  sm.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  sm.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  vkCreateSampler(device, &sm, nullptr, &msdfSampler);
+
+  // Staging buffer holding the atlas bytes (uploaded later via recordAtlasUpload).
+  VkDeviceSize atlasBytes = (VkDeviceSize)msdfAtlasW * msdfAtlasH * 4;
+  VkBufferCreateInfo sb{};
+  sb.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  sb.size  = atlasBytes;
+  sb.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  vkCreateBuffer(device, &sb, nullptr, &msdfStaging);
+  VkMemoryRequirements sr{};
+  vkGetBufferMemoryRequirements(device, msdfStaging, &sr);
+  VkMemoryAllocateInfo sa{};
+  sa.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  sa.allocationSize  = sr.size;
+  sa.memoryTypeIndex = findMemoryType(sr.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  vkAllocateMemory(device, &sa, nullptr, &msdfStagingMem);
+  vkBindBufferMemory(device, msdfStaging, msdfStagingMem, 0);
+  void* sp = nullptr;
+  vkMapMemory(device, msdfStagingMem, 0, atlasBytes, 0, &sp);
+  std::memcpy(sp, font.atlas().data(), (size_t)atlasBytes);
+  vkUnmapMemory(device, msdfStagingMem);
+
+  // Descriptor set: one combined image sampler.
+  VkDescriptorSetLayoutBinding b{};
+  b.binding         = 0;
+  b.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  b.descriptorCount = 1;
+  b.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+  VkDescriptorSetLayoutCreateInfo dl{};
+  dl.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  dl.bindingCount = 1;
+  dl.pBindings    = &b;
+  vkCreateDescriptorSetLayout(device, &dl, nullptr, &msdfSetLayout);
+
+  VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+  VkDescriptorPoolCreateInfo dp{};
+  dp.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  dp.poolSizeCount = 1;
+  dp.pPoolSizes    = &ps;
+  dp.maxSets       = 1;
+  vkCreateDescriptorPool(device, &dp, nullptr, &msdfPool);
+
+  VkDescriptorSetAllocateInfo das{};
+  das.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  das.descriptorPool     = msdfPool;
+  das.descriptorSetCount = 1;
+  das.pSetLayouts        = &msdfSetLayout;
+  vkAllocateDescriptorSets(device, &das, &msdfSet);
+
+  VkDescriptorImageInfo di{};
+  di.sampler     = msdfSampler;
+  di.imageView   = msdfAtlasView;
+  di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  VkWriteDescriptorSet w{};
+  w.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  w.dstSet          = msdfSet;
+  w.dstBinding      = 0;
+  w.descriptorCount = 1;
+  w.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  w.pImageInfo      = &di;
+  vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+
+  // Vertex buffer (host-visible, rewritten each scene change).
+  VkDeviceSize vbBytes = (VkDeviceSize)MAX_MSDF_VERTS * MSDF_VERT_FLOATS * sizeof(float);
+  VkBufferCreateInfo vb{};
+  vb.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  vb.size  = vbBytes;
+  vb.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+  vkCreateBuffer(device, &vb, nullptr, &msdfVertBuffer);
+  VkMemoryRequirements vr{};
+  vkGetBufferMemoryRequirements(device, msdfVertBuffer, &vr);
+  VkMemoryAllocateInfo va{};
+  va.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  va.allocationSize  = vr.size;
+  va.memoryTypeIndex = findMemoryType(vr.memoryTypeBits,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  vkAllocateMemory(device, &va, nullptr, &msdfVertMemory);
+  vkBindBufferMemory(device, msdfVertBuffer, msdfVertMemory, 0);
+  vkMapMemory(device, msdfVertMemory, 0, vbBytes, 0, &msdfVertMapped);
+
+  // Pipeline.
+  VkPushConstantRange pcr{};
+  pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+  pcr.offset     = 0;
+  pcr.size       = sizeof(float) * 8;  // screen.xy pxRange pad atlas.xy scroll.xy
+  VkPipelineLayoutCreateInfo pl{};
+  pl.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  pl.setLayoutCount         = 1;
+  pl.pSetLayouts            = &msdfSetLayout;
+  pl.pushConstantRangeCount = 1;
+  pl.pPushConstantRanges    = &pcr;
+  vkCreatePipelineLayout(device, &pl, nullptr, &msdfPipelineLayout);
+
+  VkShaderModule vs = loadShader("shaders/msdf_vert.spv");
+  VkShaderModule fs = loadShader("shaders/msdf_frag.spv");
+  if (vs == VK_NULL_HANDLE || fs == VK_NULL_HANDLE) { LOGE("MSDF shaders missing"); return; }
+
+  VkPipelineShaderStageCreateInfo stages[2]{};
+  stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+  stages[0].module = vs;
+  stages[0].pName  = "main";
+  stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+  stages[1].module = fs;
+  stages[1].pName  = "main";
+
+  VkVertexInputBindingDescription bind{};
+  bind.binding   = 0;
+  bind.stride    = MSDF_VERT_FLOATS * sizeof(float);
+  bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+  VkVertexInputAttributeDescription attrs[3]{};
+  attrs[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT,       0};
+  attrs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT,       2 * sizeof(float)};
+  attrs[2] = {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 4 * sizeof(float)};
+  VkPipelineVertexInputStateCreateInfo vi{};
+  vi.sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  vi.vertexBindingDescriptionCount   = 1;
+  vi.pVertexBindingDescriptions      = &bind;
+  vi.vertexAttributeDescriptionCount = 3;
+  vi.pVertexAttributeDescriptions    = attrs;
+
+  VkPipelineInputAssemblyStateCreateInfo ia2{};
+  ia2.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  ia2.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+  VkPipelineViewportStateCreateInfo vp{};
+  vp.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  vp.viewportCount = 1;
+  vp.scissorCount  = 1;
+
+  VkPipelineRasterizationStateCreateInfo rs{};
+  rs.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  rs.polygonMode = VK_POLYGON_MODE_FILL;
+  rs.cullMode    = VK_CULL_MODE_NONE;
+  rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  rs.lineWidth   = 1.0f;
+
+  VkPipelineMultisampleStateCreateInfo ms{};
+  ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+  VkPipelineColorBlendAttachmentState cba{};
+  cba.blendEnable         = VK_TRUE;
+  cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+  cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+  cba.colorBlendOp        = VK_BLEND_OP_ADD;
+  cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+  cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+  cba.alphaBlendOp        = VK_BLEND_OP_ADD;
+  cba.colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  VkPipelineColorBlendStateCreateInfo cb{};
+  cb.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  cb.attachmentCount = 1;
+  cb.pAttachments    = &cba;
+
+  VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+  VkPipelineDynamicStateCreateInfo ds{};
+  ds.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+  ds.dynamicStateCount = 2;
+  ds.pDynamicStates    = dyn;
+
+  VkGraphicsPipelineCreateInfo gp{};
+  gp.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  gp.stageCount          = 2;
+  gp.pStages             = stages;
+  gp.pVertexInputState   = &vi;
+  gp.pInputAssemblyState = &ia2;
+  gp.pViewportState      = &vp;
+  gp.pRasterizationState = &rs;
+  gp.pMultisampleState   = &ms;
+  gp.pColorBlendState    = &cb;
+  gp.pDynamicState       = &ds;
+  gp.layout              = msdfPipelineLayout;
+  gp.renderPass          = renderPass;
+  gp.subpass             = 0;
+  if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr,
+                                &msdfPipeline) != VK_SUCCESS) {
+    LOGE("Failed to create MSDF pipeline");
+    msdfPipeline = VK_NULL_HANDLE;
+  } else {
+    LOGI("MSDF pipeline created OK");
+  }
+  vkDestroyShaderModule(device, vs, nullptr);
+  vkDestroyShaderModule(device, fs, nullptr);
+}
+
+void Renderer::recordAtlasUpload(VkCommandBuffer cmd) {
+  if (msdfAtlasImage == VK_NULL_HANDLE) return;
+
+  VkImageMemoryBarrier toDst{};
+  toDst.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+  toDst.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+  toDst.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  toDst.image               = msdfAtlasImage;
+  toDst.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  toDst.srcAccessMask       = 0;
+  toDst.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+                       1, &toDst);
+
+  VkBufferImageCopy region{};
+  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  region.imageExtent      = {msdfAtlasW, msdfAtlasH, 1};
+  vkCmdCopyBufferToImage(cmd, msdfStaging, msdfAtlasImage,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+  VkImageMemoryBarrier toRead = toDst;
+  toRead.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  toRead.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &toRead);
+}
+
+void Renderer::uploadGlyphQuads(const float* verts, uint32_t vertCount) {
+  if (vertCount > MAX_MSDF_VERTS) vertCount = MAX_MSDF_VERTS;
+  if (vertCount > 0 && msdfVertMapped)
+    std::memcpy(msdfVertMapped, verts, (size_t)vertCount * MSDF_VERT_FLOATS * sizeof(float));
+  msdfVertCount = vertCount;
+}
+
+void Renderer::drawMsdfRange(VkCommandBuffer cmd, uint32_t firstVert,
+                            uint32_t vertCount, float scrollX, float scrollY,
+                            int32_t sx, int32_t sy, uint32_t sw, uint32_t sh) {
+  if (msdfPipeline == VK_NULL_HANDLE || vertCount == 0) return;
+
+  VkViewport vp{0.f, 0.f, (float)screenWidth, (float)screenHeight, 0.f, 1.f};
+  VkRect2D   sc{{sx, sy}, {sw, sh}};
+  vkCmdSetViewport(cmd, 0, 1, &vp);
+  vkCmdSetScissor(cmd, 0, 1, &sc);
+
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, msdfPipeline);
+  float push[8] = {(float)screenWidth, (float)screenHeight, msdfPxRange, 0.0f,
+                   (float)msdfAtlasW, (float)msdfAtlasH, scrollX, scrollY};
+  vkCmdPushConstants(cmd, msdfPipelineLayout,
+                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                     0, sizeof(push), push);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, msdfPipelineLayout,
+                          0, 1, &msdfSet, 0, nullptr);
+  VkDeviceSize off = 0;
+  vkCmdBindVertexBuffers(cmd, 0, 1, &msdfVertBuffer, &off);
+  vkCmdDraw(cmd, vertCount, 1, firstVert, 0);
+}
+
 void Renderer::cleanup() {
   vkDestroySampler  (device, outputSampler,     nullptr);
   vkDestroyImageView(device, outputImageView,   nullptr);
@@ -553,4 +851,19 @@ void Renderer::cleanup() {
 
   vkDestroyDescriptorPool     (device, descriptorPool,      nullptr);
   vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+
+  // MSDF resources
+  if (msdfVertMapped) { vkUnmapMemory(device, msdfVertMemory); msdfVertMapped = nullptr; }
+  if (msdfPipeline)       vkDestroyPipeline      (device, msdfPipeline,       nullptr);
+  if (msdfPipelineLayout) vkDestroyPipelineLayout(device, msdfPipelineLayout, nullptr);
+  if (msdfPool)           vkDestroyDescriptorPool (device, msdfPool,          nullptr);
+  if (msdfSetLayout)      vkDestroyDescriptorSetLayout(device, msdfSetLayout, nullptr);
+  if (msdfVertBuffer)     vkDestroyBuffer(device, msdfVertBuffer, nullptr);
+  if (msdfVertMemory)     vkFreeMemory   (device, msdfVertMemory, nullptr);
+  if (msdfStaging)        vkDestroyBuffer(device, msdfStaging,    nullptr);
+  if (msdfStagingMem)     vkFreeMemory   (device, msdfStagingMem, nullptr);
+  if (msdfSampler)        vkDestroySampler  (device, msdfSampler,     nullptr);
+  if (msdfAtlasView)      vkDestroyImageView(device, msdfAtlasView,   nullptr);
+  if (msdfAtlasImage)     vkDestroyImage    (device, msdfAtlasImage,  nullptr);
+  if (msdfAtlasMemory)    vkFreeMemory      (device, msdfAtlasMemory, nullptr);
 }
