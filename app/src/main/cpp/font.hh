@@ -22,10 +22,10 @@ struct Font {
     // scale: desired cap-height in pixels (used as em-square height).
     // Returns number of curve records emitted, or -1 on error.
     int emitGlyph(std::vector<float>& out,
-                  char c, float x, float y, float scale,
+                  uint32_t cp, float x, float y, float scale,
                   float r, float g, float b, float a) const;
 
-    float glyphAdvance(char c, float scale) const;
+    float glyphAdvance(uint32_t cp, float scale) const;
     float stringWidth(std::string_view str, float scale) const;
 
     void emitString(std::vector<float>& out,

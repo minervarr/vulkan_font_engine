@@ -1,5 +1,7 @@
 #include "msdf.hh"
 
+#include "utf8.hh"
+
 #include <android/log.h>
 #include <cstring>
 
@@ -47,6 +49,7 @@ bool MsdfFont::load(AAssetManager* mgr, const char* metricsPath,
     g.planeL = rdF32(p); g.planeT = rdF32(p); g.planeR = rdF32(p); g.planeB = rdF32(p);
     g.atlasL = rdF32(p); g.atlasT = rdF32(p); g.atlasR = rdF32(p); g.atlasB = rdF32(p);
     glyphs_[cp] = g;
+    if (cp < kFastCount) { fast_[cp] = g; fastHas_[cp] = true; }
   }
 
   atlas_ = readAsset(mgr, atlasPath);
@@ -61,22 +64,22 @@ bool MsdfFont::load(AAssetManager* mgr, const char* metricsPath,
 }
 
 float MsdfFont::advance(uint32_t cp, float sizePx) const {
-  auto it = glyphs_.find(cp);
-  return (it == glyphs_.end()) ? 0.0f : it->second.advance * sizePx;
+  const MsdfGlyph* g = lookup(cp);
+  return g ? g->advance * sizePx : 0.0f;
 }
 
 float MsdfFont::textWidth(std::string_view s, float sizePx) const {
   float w = 0.0f;
-  for (char c : s) w += advance((uint32_t)(unsigned char)c, sizePx);
+  for (size_t i = 0; i < s.size(); ) w += advance(utf8::nextCodepoint(s, i), sizePx);
   return w;
 }
 
 float MsdfFont::layout(uint32_t cp, float penX, float baselineY, float sizePx,
                        GlyphQuad& q) const {
   q.draw = false;
-  auto it = glyphs_.find(cp);
-  if (it == glyphs_.end()) return penX;
-  const MsdfGlyph& gl = it->second;
+  const MsdfGlyph* g = lookup(cp);
+  if (!g) return penX;
+  const MsdfGlyph& gl = *g;
   if (!gl.hasGlyph) return penX + gl.advance * sizePx;  // e.g. space
 
   // Screen-space quad (yOrigin top: plane top is above baseline → smaller y).
