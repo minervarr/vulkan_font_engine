@@ -1,5 +1,6 @@
 #include "font.hh"
 #include "renderer.hh"
+#include "utf8.hh"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -248,10 +249,10 @@ void Font::destroy() {
 }
 
 int Font::emitGlyph(std::vector<float>& out,
-                    char c, float x, float y, float scale,
+                    uint32_t cp, float x, float y, float scale,
                     float r, float g, float b, float a) const {
     FT_Face face = (FT_Face)ftFace;
-    FT_UInt gi   = FT_Get_Char_Index(face, (FT_ULong)(unsigned char)c);
+    FT_UInt gi   = FT_Get_Char_Index(face, (FT_ULong)cp);
     if (FT_Load_Glyph(face, gi, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING) != 0)
         return -1;
 
@@ -265,16 +266,16 @@ int Font::emitGlyph(std::vector<float>& out,
     return (int)(out.size() / Renderer::CURVE_FLOATS) - before;
 }
 
-float Font::glyphAdvance(char c, float scale) const {
+float Font::glyphAdvance(uint32_t cp, float scale) const {
     FT_Face face = (FT_Face)ftFace;
-    if (c == ' ') {
+    if (cp == ' ') {
         FT_UInt gi = FT_Get_Char_Index(face, (FT_ULong)' ');
         if (gi && FT_Load_Glyph(face, gi, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING) == 0)
             return (float)face->glyph->metrics.horiAdvance
                    / (float)face->units_per_EM * scale;
         return 0.5f * scale;
     }
-    FT_UInt gi = FT_Get_Char_Index(face, (FT_ULong)(unsigned char)c);
+    FT_UInt gi = FT_Get_Char_Index(face, (FT_ULong)cp);
     if (!gi) return 0.6f * scale;
     if (FT_Load_Glyph(face, gi, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING) != 0)
         return 0.6f * scale;
@@ -284,15 +285,17 @@ float Font::glyphAdvance(char c, float scale) const {
 
 float Font::stringWidth(std::string_view str, float scale) const {
     float w = 0.0f;
-    for (char p : str) w += glyphAdvance(p, scale);
+    for (size_t i = 0; i < str.size(); )
+        w += glyphAdvance(utf8::nextCodepoint(str, i), scale);
     return w;
 }
 
 void Font::emitString(std::vector<float>& out,
                       std::string_view str, float x, float y, float scale,
                       float r, float g, float b, float a) const {
-    for (char p : str) {
-        if (p != ' ') emitGlyph(out, p, x, y, scale, r, g, b, a);
-        x += glyphAdvance(p, scale);
+    for (size_t i = 0; i < str.size(); ) {
+        uint32_t cp = utf8::nextCodepoint(str, i);
+        if (cp != ' ') emitGlyph(out, cp, x, y, scale, r, g, b, a);
+        x += glyphAdvance(cp, scale);
     }
 }

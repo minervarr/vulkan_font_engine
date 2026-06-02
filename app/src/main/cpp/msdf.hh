@@ -56,7 +56,20 @@ class MsdfFont {
                GlyphQuad& q) const;
 
  private:
+  // Glyph lookup is the font engine's hottest path (every char of every text
+  // measure + emit). Codepoints 0x00–0xFF (ASCII + Latin-1 Supplement — the
+  // overwhelmingly common case) resolve through a flat array; rarer codepoints
+  // fall back to the hash map.
+  static constexpr uint32_t kFastCount = 0x100;
+  const MsdfGlyph* lookup(uint32_t cp) const {
+    if (cp < kFastCount) return fastHas_[cp] ? &fast_[cp] : nullptr;
+    auto it = glyphs_.find(cp);
+    return it == glyphs_.end() ? nullptr : &it->second;
+  }
+
   std::unordered_map<uint32_t, MsdfGlyph> glyphs_;
+  MsdfGlyph fast_[kFastCount];
+  bool      fastHas_[kFastCount] = {};
   std::vector<uint8_t> atlas_;
   uint32_t atlasW_ = 0, atlasH_ = 0;
   float distanceRange_ = 4.0f, sizePxEm_ = 40.0f;
