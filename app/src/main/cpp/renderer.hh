@@ -48,54 +48,59 @@ struct Renderer {
   VkPipeline       tilingPipeline        = VK_NULL_HANDLE;
   VkPipeline       coveragePipeline      = VK_NULL_HANDLE;
 
-  // MSDF resources
-  VkImage          msdfAtlasImage   = VK_NULL_HANDLE;
-  VkDeviceMemory   msdfAtlasMemory  = VK_NULL_HANDLE;
-  VkImageView      msdfAtlasView    = VK_NULL_HANDLE;
-  VkSampler        msdfSampler      = VK_NULL_HANDLE;
-  VkBuffer         msdfStaging      = VK_NULL_HANDLE;
-  VkDeviceMemory   msdfStagingMem   = VK_NULL_HANDLE;
-  VkBuffer         msdfVertBuffer   = VK_NULL_HANDLE;
-  VkDeviceMemory   msdfVertMemory   = VK_NULL_HANDLE;
-  void*            msdfVertMapped   = nullptr;
-  VkDescriptorSetLayout msdfSetLayout = VK_NULL_HANDLE;
-  VkDescriptorPool      msdfPool      = VK_NULL_HANDLE;
-  VkDescriptorSet       msdfSet       = VK_NULL_HANDLE;
-  VkPipelineLayout msdfPipelineLayout = VK_NULL_HANDLE;
-  VkPipeline       msdfPipeline       = VK_NULL_HANDLE;
-  uint32_t         msdfAtlasW = 0, msdfAtlasH = 0;
-  float            msdfPxRange = 4.0f;
-  uint32_t         msdfVertCount = 0;
+  // ── MSDF text path ─────────────────────────────────────────────────────────
+  static constexpr uint32_t MAX_MSDF_VERTS   = 96000; // total verts for all weights
+  static constexpr uint32_t MSDF_VERT_FLOATS = 8;     // pos.xy uv.xy rgba
+  static constexpr int      MAX_FONT_WEIGHTS = 4;      // Regular/Bold/Italic/BoldItalic
+
+  // Per-weight atlas resources (one atlas texture + descriptor set per weight)
+  VkImage          msdfAtlasImage [MAX_FONT_WEIGHTS] = {};
+  VkDeviceMemory   msdfAtlasMemory[MAX_FONT_WEIGHTS] = {};
+  VkImageView      msdfAtlasView  [MAX_FONT_WEIGHTS] = {};
+  VkSampler        msdfSampler    [MAX_FONT_WEIGHTS] = {};
+  VkBuffer         msdfStaging    [MAX_FONT_WEIGHTS] = {};
+  VkDeviceMemory   msdfStagingMem [MAX_FONT_WEIGHTS] = {};
+  VkDescriptorSet  msdfSet        [MAX_FONT_WEIGHTS] = {};
+  uint32_t         msdfAtlasW     [MAX_FONT_WEIGHTS] = {};
+  uint32_t         msdfAtlasH     [MAX_FONT_WEIGHTS] = {};
+  float            msdfPxRange    [MAX_FONT_WEIGHTS] = {};
+  uint32_t         msdfVertCount  [MAX_FONT_WEIGHTS] = {};
+
+  // Shared across all weights (one pipeline, one vertex buffer, one layout)
+  VkBuffer         msdfVertBuffer      = VK_NULL_HANDLE;
+  VkDeviceMemory   msdfVertMemory      = VK_NULL_HANDLE;
+  void*            msdfVertMapped      = nullptr;
+  VkDescriptorSetLayout msdfSetLayout  = VK_NULL_HANDLE;
+  VkDescriptorPool      msdfPool       = VK_NULL_HANDLE;
+  VkPipelineLayout msdfPipelineLayout  = VK_NULL_HANDLE;
+  VkPipeline       msdfPipeline        = VK_NULL_HANDLE;
+
+  // Vertex offset for weight w: w * (MAX_MSDF_VERTS / MAX_FONT_WEIGHTS)
+  uint32_t msdfVertOffset(int w) const {
+      return (uint32_t)w * (MAX_MSDF_VERTS / (uint32_t)MAX_FONT_WEIGHTS);
+  }
 
   void init(VkDevice dev, VkPhysicalDevice phyDev, AAssetManager* mgr,
             uint32_t width, uint32_t height);
   void cleanup();
 
   void uploadCurves(const float* curveData, uint32_t count);
-
   void transitionOutputImageInitial(VkCommandBuffer cmd);
   void dispatch(VkCommandBuffer cmd);
 
-  // ── MSDF text path ─────────────────────────────────────────────────────────
-  // Crisp, cheap text via an offline MSDF atlas (Chlumsky). Glyphs are drawn as
-  // textured quads in the app's render pass, bypassing the Bézier coverage pass.
-  static constexpr uint32_t MAX_MSDF_VERTS  = 96000;  // 16000 glyphs * 6 verts
-  static constexpr uint32_t MSDF_VERT_FLOATS = 8;     // pos.xy uv.xy rgba
-
-  // Creates the atlas image/sampler, descriptor, vertex buffer and graphics
-  // pipeline. Call after the render pass exists and the font is loaded.
-  void createMsdfResources(VkRenderPass renderPass, const MsdfFont& font);
-  // Records the one-time atlas upload (staging -> device image) into an init
-  // command buffer that the caller submits and waits on.
-  void recordAtlasUpload(VkCommandBuffer cmd);
-  bool msdfReady() const { return msdfPipeline != VK_NULL_HANDLE; }
-  void uploadGlyphQuads(const float* verts, uint32_t vertCount);
-  uint32_t msdfVerts() const { return msdfVertCount; }
-  // Draw a sub-range of the uploaded glyph quads with a scroll offset (px) and a
-  // scissor rectangle (px). The geometry is static; scrolling is just the offset.
+  // Creates atlas + descriptor for one weight. Shared pipeline/vertex-buffer/layout
+  // are created on the first call (weightIdx==0 or whichever is first).
+  void createMsdfResources(VkRenderPass renderPass, const MsdfFont& font, int weightIdx = 0);
+  // Records atlas upload (staging → device image) for a specific weight.
+  void recordAtlasUpload(VkCommandBuffer cmd, int weightIdx = 0);
+  bool msdfReady(int weightIdx = 0) const { return msdfPipeline != VK_NULL_HANDLE &&
+                                                    msdfAtlasImage[weightIdx] != VK_NULL_HANDLE; }
+  void uploadGlyphQuads(const float* verts, uint32_t vertCount, int weightIdx = 0);
+  uint32_t msdfVerts(int weightIdx = 0) const { return msdfVertCount[weightIdx]; }
   void drawMsdfRange(VkCommandBuffer cmd, uint32_t firstVert, uint32_t vertCount,
                      float scrollX, float scrollY,
-                     int32_t sx, int32_t sy, uint32_t sw, uint32_t sh);
+                     int32_t sx, int32_t sy, uint32_t sw, uint32_t sh,
+                     int weightIdx = 0);
 
  private:
   void createDescriptorLayoutAndPool();
