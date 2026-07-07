@@ -247,7 +247,16 @@ void App::init(ANativeWindow* window, AAssetManager* mgr) {
   }
 
   // ── Renderer (compute pipelines) ──────────────────────────────────────────
-  renderer.init(logicalDevice, physicalDevice, mgr,
+  AssetLoader assetLoader = [mgr](const char* path) -> std::vector<uint8_t> {
+    AAsset* a = AAssetManager_open(mgr, path, AASSET_MODE_BUFFER);
+    if (!a) return {};
+    size_t n = (size_t)AAsset_getLength(a);
+    std::vector<uint8_t> buf(n);
+    AAsset_read(a, buf.data(), n);
+    AAsset_close(a);
+    return buf;
+  };
+  renderer.init(logicalDevice, physicalDevice, assetLoader,
                 swapchainExtent.width, swapchainExtent.height);
 
   // Transition output image layout (one-shot command)

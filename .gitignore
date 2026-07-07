@@ -11,7 +11,7 @@ build/
 local.properties
 
 # NDK / CMake build caches
-app/.cxx/
+**/.cxx/
 **/.externalNativeBuild/
 **/cmake-build-*/
 
