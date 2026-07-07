@@ -24,11 +24,14 @@ float4 main(PSIn i) : SV_Target {
   float3 msd = msdf.Sample(i.uv).rgb;
   float  sd  = median(msd.r, msd.g, msd.b);
 
-  // Convert the signed distance to screen-pixel coverage. unitRange is the
-  // distance range expressed in texture-UV units; screenTexSize is how many
-  // atlas texels map to one screen pixel here (via derivatives).
-  float2 unitRange     = float2(push.pxRange, push.pxRange) / push.atlasSize;
-  float2 screenTexSize = float2(1.0, 1.0) / fwidth(i.uv);
+  // Canonical Chlumsky screen-px-range: convert the distance field's texel range to
+  // the number of screen pixels it spans AT THIS fragment's scale, so the edge stays
+  // exactly 1px-soft (razor sharp) at any zoom. `unitRange` is the field range in uv
+  // units; `screenTexSize` is screen px per uv unit (from the per-axis derivative).
+  // The 0.5*dot averages the two axes; the max(...,1) floor avoids over-sharpening
+  // (shimmer) when the glyph is minified below the atlas resolution.
+  float2 unitRange     = push.pxRange / push.atlasSize;
+  float2 screenTexSize = 1.0 / max(fwidth(i.uv), 1e-8);
   float  screenPxRange = max(0.5 * dot(unitRange, screenTexSize), 1.0);
 
   float screenPxDist = screenPxRange * (sd - 0.5);

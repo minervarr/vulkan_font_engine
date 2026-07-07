@@ -14,13 +14,14 @@ struct PushConstants {
   uint curveCount;
   uint tileCountX;
   uint tileCountY;
+  uint hasWinding;     // 0 when the scene has no type-4/5/6 curves → skip Pass 2
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> push;
 
-static const uint TILE_STRIDE       = 65;    // 1 count + 64 curve indices per SDF tile
+static const uint TILE_STRIDE       = 97;    // 1 count + 96 curve indices per SDF tile
 static const uint WIND_STRIDE       = 65;    // 1 count + 64 winding indices per winding-tile
-static const uint MAX_PER_TILE      = 64u;
+static const uint MAX_PER_TILE      = 96u;   // must match tiling.slang + host
 static const uint MAX_PER_WIND_TILE = 64u;
 
 // ── Robust winding-crossing helpers ─────────────────────────────────────────
@@ -194,7 +195,10 @@ float evaluateCurve(uint curveIndex, float fpx, float fpy)
     float2 v0 = float2(a, b);
     float2 v1 = float2(c, d);
     float2 e  = v1 - v0;
-    float  t  = saturate(dot(pp - v0, e) / dot(e, e));
+    // Zero-length segment guard: dot(e,e)==0 would make t = 0/0 = NaN, which
+    // poisons the whole tile (visible garbage squares). Degenerate → a dot.
+    float  ee = dot(e, e);
+    float  t  = (ee > 0.0) ? saturate(dot(pp - v0, e) / ee) : 0.0;
     float2 q  = v0 + e * t;
     result    = length(pp - q);
   };
@@ -226,7 +230,7 @@ float4 shadePixel(uint px, uint py, float fpx, float fpy)
     uint n = min(count, MAX_PER_TILE);
 
     // Insertion-sort by curve index for painter's-algorithm ordering.
-    uint sortedCurves[64];
+    uint sortedCurves[96];
     for (uint si = 0u; si < n; si++) sortedCurves[si] = tiles[tileOffset + 1u + si];
     for (uint si = 1u; si < n; si++) {
       uint key = sortedCurves[si];
@@ -263,7 +267,7 @@ float4 shadePixel(uint px, uint py, float fpx, float fpy)
   // per tile-row.  A curve whose rightmost-tile is < this pixel's tile column
   // has its maxX strictly less than fpx, so the rightward ray cannot cross
   // it.  Start the walk at the pixel's own column to skip all such curves.
-  {
+  if (push.hasWinding != 0u) {
     uint ty = py / 16u;
     uint pixelTx = px / 16u;
 
@@ -317,12 +321,13 @@ float4 shadePixel(uint px, uint py, float fpx, float fpy)
 
 // ── Main ────────────────────────────────────────────────────────────────────
 //
-// The winding fill is a binary inside/outside test, so a single centre sample
-// produces hard, aliased glyph edges.  4x4 supersampling averages 16 sub-pixel
-// samples per pixel, turning edge pixels into fractional coverage → smooth
-// outlines.  This is affordable because the compute pass runs only once per
-// scene change (the result is cached in outputImage and re-composited to each
-// swapchain image), not every frame.  Cost scales as SS*SS.
+// Supersampling (SS×SS) only matters for the binary winding-fill path (types
+// 4–6), which needs it for smooth glyph edges. SDF shapes (types 0–3) already
+// get analytic 1px anti-aliasing from their smoothstep, so a single centre
+// sample is enough. Consumers that animate the overlay (so the compute pass
+// runs every frame, not once per scene change) and render text via MSDF quads
+// instead of winding fills — e.g. the calculator — keep SS=1 to stay at 60fps;
+// cost scales as SS*SS. Raise SS for static scenes that use winding-fill text.
 [numthreads(16, 16, 1)]
 void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID)
 {
@@ -331,7 +336,7 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID)
 
   if (px >= push.screenWidth || py >= push.screenHeight) return;
 
-  const uint SS = 2u;   // sub-samples per axis (2x2 = 4 samples)
+  const uint SS = 1u;   // sub-samples per axis (1 = centre sample only)
   float4 acc = float4(0.0, 0.0, 0.0, 0.0);
   for (uint sy = 0u; sy < SS; sy++) {
     for (uint sx = 0u; sx < SS; sx++) {

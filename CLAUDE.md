@@ -38,6 +38,21 @@ Shaders:
 - `coverage.slang` — compute shader: rasterizes curves per tile into coverage image
 - `composite_vert.slang` / `composite_frag.slang` — screen-quad vertex/fragment shaders for final composite
 
+## MSDF atlas pipeline (producer + consumer, both in this repo)
+
+- **Runtime reader**: `app/src/main/cpp/msdf.cc` — `MsdfFont::load` reads the pre-baked
+  `font.msdf` (v2 binary) + `atlas.rgba`; `MsdfFont::generateFromFont` is a dynamic fallback
+  that rasterises MSDFs at runtime via msdfgen.
+- **Vendored msdfgen**: `app/src/main/msdfgen/` (sibling of `freetype/`) — linked by `vk_font`
+  and by consumers that compile `msdf.cc` (e.g. the calculator app), and by the baker below.
+- **Offline baker**: `tools/atlas_gen/` — desktop host tool (Windows/Linux; not part of the
+  Android build). `pwsh tools/atlas_gen/build.ps1` → `tools/atlas_gen/build/atlas_gen.exe`;
+  feed it 4 OTFs (roman/bold/italic/math — the Latin Modern set is bundled in
+  `tools/atlas_gen/fonts/`, GUST Font License) and it emits `font.msdf` + `atlas.rgba`, cracking
+  the OpenType MATH table by hand (`math_table.{hh,cc}`). Density via `ATLAS_EM`/`ATLAS_AW`
+  env vars. The writer (`atlas_gen.cc`) and reader (`msdf.cc`) must stay byte-for-byte in
+  sync on the v2 format — bump the version word if it ever changes.
+
 ## Architecture
 
 This app renders text entirely on the GPU using Vulkan compute shaders. FreeType decomposes font glyphs into cubic Bézier curves; those curves are uploaded to the GPU; a two-pass compute pipeline rasterizes them.
