@@ -1,3 +1,6 @@
 [submodule "app/src/main/freetype"]
 	path = app/src/main/freetype
 	url = https://github.com/freetype/freetype.git
+[submodule "app/src/main/msdfgen"]
+	path = app/src/main/msdfgen
+	url = https://github.com/Chlumsky/msdfgen.git
