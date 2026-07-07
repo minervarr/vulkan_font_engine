@@ -1,0 +1,4 @@
+C:\Users\incxiuefb\Documents\Files\clone\vulkan_canvas_engine\first_party\vulkan_font_engine\core\CMakeLists.txt
+C:\Users\incxiuefb\Documents\Files\clone\vulkan_canvas_engine\first_party\vulkan_font_engine\platform\android\CMakeLists.txt
+C:\Users\incxiuefb\Documents\Files\clone\vulkan_canvas_engine\first_party\vulkan_font_engine\third_party\freetype\CMakeLists.txt
+C:\Users\incxiuefb\Documents\Files\clone\vulkan_canvas_engine\first_party\vulkan_font_engine\third_party\msdfgen\CMakeLists.txt

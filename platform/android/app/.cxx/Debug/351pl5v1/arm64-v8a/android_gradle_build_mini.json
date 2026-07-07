@@ -1,0 +1,59 @@
+{
+  "buildFiles": [
+    "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\core\\CMakeLists.txt",
+    "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\platform\\android\\CMakeLists.txt",
+    "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\third_party\\freetype\\CMakeLists.txt",
+    "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\third_party\\msdfgen\\CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "C:\\PPProgam\\android_sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+      "-C",
+      "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\platform\\android\\app\\.cxx\\Debug\\351pl5v1\\arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "C:\\PPProgam\\android_sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+    "-C",
+    "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\platform\\android\\app\\.cxx\\Debug\\351pl5v1\\arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "vk_font_core::@6e91a8e96967983e100c": {
+      "artifactName": "vk_font_core",
+      "abi": "arm64-v8a",
+      "output": "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\platform\\android\\app\\.cxx\\Debug\\351pl5v1\\arm64-v8a\\vk_font_core\\libvk_font_core.a",
+      "runtimeFiles": []
+    },
+    "msdfgen-ext::@bb91f0987595ecba42f4": {
+      "artifactName": "msdfgen-ext",
+      "abi": "arm64-v8a",
+      "output": "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\platform\\android\\app\\.cxx\\Debug\\351pl5v1\\arm64-v8a\\msdfgen\\libmsdfgen-ext.a",
+      "runtimeFiles": []
+    },
+    "vk_font::@6890427a1f51a3e7e1df": {
+      "artifactName": "vk_font",
+      "abi": "arm64-v8a",
+      "output": "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\platform\\android\\app\\build\\intermediates\\cxx\\Debug\\351pl5v1\\obj\\arm64-v8a\\libvk_font.so",
+      "runtimeFiles": []
+    },
+    "compile_shaders::@6890427a1f51a3e7e1df": {
+      "artifactName": "compile_shaders",
+      "abi": "arm64-v8a",
+      "runtimeFiles": []
+    },
+    "freetype::@96957e95d729942f8bb0": {
+      "artifactName": "freetype",
+      "abi": "arm64-v8a",
+      "output": "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\platform\\android\\app\\.cxx\\Debug\\351pl5v1\\arm64-v8a\\freetype\\libfreetyped.a",
+      "runtimeFiles": []
+    },
+    "msdfgen-core::@bb91f0987595ecba42f4": {
+      "artifactName": "msdfgen-core",
+      "abi": "arm64-v8a",
+      "output": "C:\\Users\\incxiuefb\\Documents\\Files\\clone\\vulkan_canvas_engine\\first_party\\vulkan_font_engine\\platform\\android\\app\\.cxx\\Debug\\351pl5v1\\arm64-v8a\\msdfgen\\libmsdfgen-core.a",
+      "runtimeFiles": []
+    }
+  }
+}

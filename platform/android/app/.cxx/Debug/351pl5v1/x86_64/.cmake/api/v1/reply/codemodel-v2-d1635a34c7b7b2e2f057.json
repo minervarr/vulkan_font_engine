@@ -1,0 +1,187 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Debug-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						4
+					]
+				},
+				{
+					"build" : "vk_font_core",
+					"childIndexes" : 
+					[
+						2,
+						3
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-vk_font_core-Debug-371d8e8bce4b2ee2d93b.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10.0"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "C:/Users/incxiuefb/Documents/Files/clone/vulkan_canvas_engine/first_party/vulkan_font_engine/core",
+					"targetIndexes" : 
+					[
+						5
+					]
+				},
+				{
+					"build" : "freetype",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-freetype-Debug-9291101e5c2231a39ed3.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.12"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "C:/Users/incxiuefb/Documents/Files/clone/vulkan_canvas_engine/first_party/vulkan_font_engine/third_party/freetype",
+					"targetIndexes" : 
+					[
+						1
+					]
+				},
+				{
+					"build" : "msdfgen",
+					"jsonFile" : "directory-msdfgen-Debug-39789c5679da2b3d49ce.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.15"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 2,
+					"source" : "C:/Users/incxiuefb/Documents/Files/clone/vulkan_canvas_engine/first_party/vulkan_font_engine/third_party/msdfgen",
+					"targetIndexes" : 
+					[
+						2,
+						3
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1,
+						2
+					],
+					"directoryIndexes" : 
+					[
+						0,
+						1
+					],
+					"name" : "vk_font_android",
+					"targetIndexes" : 
+					[
+						0,
+						4,
+						5
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						2
+					],
+					"name" : "freetype",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						1
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						3
+					],
+					"name" : "msdfgen",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						2,
+						3
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "compile_shaders::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-compile_shaders-Debug-ee0206ee3f9cd0350020.json",
+					"name" : "compile_shaders",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "freetype::@96957e95d729942f8bb0",
+					"jsonFile" : "target-freetype-Debug-cc7c607f758c46b7859e.json",
+					"name" : "freetype",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "msdfgen-core::@bb91f0987595ecba42f4",
+					"jsonFile" : "target-msdfgen-core-Debug-afe7c1985605e52e9077.json",
+					"name" : "msdfgen-core",
+					"projectIndex" : 2
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "msdfgen-ext::@bb91f0987595ecba42f4",
+					"jsonFile" : "target-msdfgen-ext-Debug-5c0293731cc3f18fe825.json",
+					"name" : "msdfgen-ext",
+					"projectIndex" : 2
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "vk_font::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-vk_font-Debug-65e3929a8c23a9415513.json",
+					"name" : "vk_font",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "vk_font_core::@6e91a8e96967983e100c",
+					"jsonFile" : "target-vk_font_core-Debug-30d2849171c91ae39df1.json",
+					"name" : "vk_font_core",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "C:/Users/incxiuefb/Documents/Files/clone/vulkan_canvas_engine/first_party/vulkan_font_engine/platform/android/app/.cxx/Debug/351pl5v1/x86_64",
+		"source" : "C:/Users/incxiuefb/Documents/Files/clone/vulkan_canvas_engine/first_party/vulkan_font_engine/platform/android"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

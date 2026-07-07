@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "vk_font_core",
+		"source" : "C:/Users/incxiuefb/Documents/Files/clone/vulkan_canvas_engine/first_party/vulkan_font_engine/core"
+	}
+}
