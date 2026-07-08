@@ -1,5 +1,5 @@
 #pragma once
-#include "asset_loader.hh"
+#include "asset_reader.hh"
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -110,8 +110,8 @@ class MsdfFont {
   static constexpr int FLOATS_PER_VERT = 8;
   static constexpr int VERTS_PER_GLYPH = 6;
 
-  bool load(const AssetLoader& loader, const char* metricsPath, const char* atlasPath);
-  bool generate(const AssetLoader& loader, const char* fontPath, const char* cachePath = nullptr);
+  bool load(AssetReader& reader, const char* metricsPath, const char* atlasPath);
+  bool generate(AssetReader& reader, const char* fontPath, const char* cachePath = nullptr);
   // Bakes an additional face into the SAME shared atlas (appended as new rows,
   // existing glyphs untouched) and registers it under `style`, the same
   // (byKey_ / styleCmap_) contract Canvas::textStyled() already reads via
@@ -120,7 +120,7 @@ class MsdfFont {
   // and creates the base atlas_ this appends to) and before the Renderer
   // uploads the atlas texture (Renderer::initMsdf), or the added rows won't
   // be on the GPU. Persisted by loadCache()/saveCache() alongside the base font.
-  bool addStyle(const AssetLoader& loader, const char* fontPath, FontStyle style);
+  bool addStyle(AssetReader& reader, const char* fontPath, FontStyle style);
   // True if addStyle() (or a loaded cache that already baked it) has content
   // for this style — lets a caller skip a redundant addStyle() rebake after a
   // cache hit that already included it.

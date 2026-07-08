@@ -1,5 +1,5 @@
 #include "font.hh"
-#include "renderer.hh"
+#include "curve_rasterizer.hh"
 #include "utf8.hh"
 #include <algorithm>
 #include <cmath>
@@ -21,7 +21,7 @@ static void emitLineRecord(std::vector<float>& out,
     float maxY = std::max(y0, y1);
 
     size_t n = out.size();
-    out.resize(n + Renderer::CURVE_FLOATS, 0.0f);
+    out.resize(n + CurveRasterizer::CURVE_FLOATS, 0.0f);
     out[n +  0] = 6.0f;          // type = line segment
     out[n +  1] = x0;
     out[n +  2] = y0;
@@ -67,7 +67,7 @@ static void emitQuadraticRecord(std::vector<float>& out,
     tightenQuad(y0, y1, y2, minY, maxY);
 
     size_t n = out.size();
-    out.resize(n + Renderer::CURVE_FLOATS, 0.0f);
+    out.resize(n + CurveRasterizer::CURVE_FLOATS, 0.0f);
     out[n +  0] = 5.0f;          // type = quadratic Bézier
     out[n +  1] = x0;
     out[n +  2] = y0;
@@ -134,7 +134,7 @@ static void emitCubicRecord(std::vector<float>& out,
     tightenCubic(y0, y1, y2, y3, minY, maxY);
 
     size_t n = out.size();
-    out.resize(n + Renderer::CURVE_FLOATS, 0.0f);
+    out.resize(n + CurveRasterizer::CURVE_FLOATS, 0.0f);
     out[n +  0] = 4.0f;          // type = cubic Bézier
     out[n +  1] = x0;            // P0
     out[n +  2] = y0;
@@ -257,13 +257,13 @@ int Font::emitGlyph(std::vector<float>& out,
         return -1;
 
     float ftScale = scale / (float)face->units_per_EM;
-    int before    = (int)(out.size() / Renderer::CURVE_FLOATS);
+    int before    = (int)(out.size() / CurveRasterizer::CURVE_FLOATS);
 
     FT_Outline_Funcs funcs = { cbMoveTo, cbLineTo, cbConicTo, cbCubicTo, 0, 0 };
     DecomposeCtx ctx{ out, r, g, b, a, 0.0f, 0.0f, ftScale, x, y };
     FT_Outline_Decompose(&face->glyph->outline, &funcs, &ctx);
 
-    return (int)(out.size() / Renderer::CURVE_FLOATS) - before;
+    return (int)(out.size() / CurveRasterizer::CURVE_FLOATS) - before;
 }
 
 float Font::glyphAdvance(uint32_t cp, float scale) const {

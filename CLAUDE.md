@@ -5,82 +5,95 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build Commands
 
 ```bash
-# Build debug APK
-./gradlew assembleDebug
+# Init submodules (first time)
+git submodule update --init --recursive
 
-# Build release APK
-./gradlew assembleRelease
+# Android demo (Gradle project is self-contained in platform/android/)
+cd platform/android
+./gradlew assembleDebug      # debug APK
+./gradlew assembleRelease    # release APK
+./install.bat                # install on connected device
+./gradlew clean              # clean build artifacts
 
-# Install on connected device
-./gradlew installDebug
-
-# Clean build artifacts
-./gradlew clean
+# Host tools (Windows: vswhere -> vcvars64 -> Ninja -> cl)
+pwsh tools/atlas_gen/build.ps1
+pwsh tools/min_text_size/build.ps1
+pwsh tools/msdf_readability/build.ps1
 ```
 
 **Prerequisites:**
-- Android NDK 29.0.14206865 (set `ANDROID_NDK_HOME`)
+- Android NDK 29.0.14206865 (set `ANDROID_NDK_HOME`) — demo app only
 - CMake 3.22.1+
-- FreeType source — set `FREETYPE_SOURCE_DIR` in `CMakeLists.txt` (defaults to sibling directory `../whisper_cpp_ui_android/app/src/main/cpp/freetype-2.13.3/`)
-- Slang compiler (`slangc.exe`) from Vulkan SDK 1.4.341.1 — required for recompiling shaders
-- No tests to run; this is a demo app with no test framework
+- FreeType and msdfgen — vendored as submodules under `third_party/` (init submodules first)
+- Slang compiler (`slangc`) from the Vulkan SDK — resolved from `$VULKAN_SDK` (override with `-DVFE_SLANGC=...`); required for recompiling shaders
+- No tests to run; the demo app has no test framework
 
 ## Shader Compilation
 
-Shaders are written in **Slang** (in `app/src/main/shaders_src/`) and compiled to SPIR-V (into `app/src/main/assets/shaders/`). CMake invokes `slangc.exe` automatically before the native library build. To recompile a shader manually:
+Shaders are written in **Slang** in the repo-root `shaders_src/` and compiled to SPIR-V via `cmake/VfeShaders.cmake` (`vfe_compile_slang()`). The Android demo compiles them into `platform/android/app/src/main/assets/shaders/` (packaged into the APK). Six shaders:
 
-```bash
-slangc.exe <shader>.slang -target spirv -o <output>.spv
-```
+- `tiling.slang` — compute: assigns curves to 16×16 tiles
+- `coverage.slang` — compute: rasterizes curves per tile into a coverage image
+- `composite_vert/frag.slang` — screen-quad composite of the coverage image
+- `msdf_vert/frag.slang` — MSDF glyph-quad text pipeline
 
-Shaders:
-- `tiling.slang` — compute shader: assigns curves to 16×16 tiles
-- `coverage.slang` — compute shader: rasterizes curves per tile into coverage image
-- `composite_vert.slang` / `composite_frag.slang` — screen-quad vertex/fragment shaders for final composite
-
-## MSDF atlas pipeline (producer + consumer, both in this repo)
-
-- **Runtime reader**: `app/src/main/cpp/msdf.cc` — `MsdfFont::load` reads the pre-baked
-  `font.msdf` (v2 binary) + `atlas.rgba`; `MsdfFont::generateFromFont` is a dynamic fallback
-  that rasterises MSDFs at runtime via msdfgen.
-- **Vendored msdfgen**: `app/src/main/msdfgen/` (sibling of `freetype/`) — linked by `vk_font`
-  and by consumers that compile `msdf.cc` (e.g. the calculator app), and by the baker below.
-- **Offline baker**: `tools/atlas_gen/` — desktop host tool (Windows/Linux; not part of the
-  Android build). `pwsh tools/atlas_gen/build.ps1` → `tools/atlas_gen/build/atlas_gen.exe`;
-  feed it 4 OTFs (roman/bold/italic/math — the Latin Modern set is bundled in
-  `tools/atlas_gen/fonts/`, GUST Font License) and it emits `font.msdf` + `atlas.rgba`, cracking
-  the OpenType MATH table by hand (`math_table.{hh,cc}`). Density via `ATLAS_EM`/`ATLAS_AW`
-  env vars. The writer (`atlas_gen.cc`) and reader (`msdf.cc`) must stay byte-for-byte in
-  sync on the v2 format — bump the version word if it ever changes.
+To recompile manually: `slangc <shader>.slang -target spirv -o <output>.spv`
 
 ## Architecture
 
-This app renders text entirely on the GPU using Vulkan compute shaders. FreeType decomposes font glyphs into cubic Bézier curves; those curves are uploaded to the GPU; a two-pass compute pipeline rasterizes them.
+One platform-agnostic engine core plus a thin Android demo backend:
 
-### Component Map
+```
+core/                      # vk_font_core STATIC lib — no platform SDK includes
+  asset_reader.hh          # THE platform seam: AssetReader (+ FileByteReader for desktop)
+  font.* glyphs.* msdf.*   # FreeType wrapper / fallback glyphs / MSDF atlas + OpenType MATH
+  gpu_util.*               # shared Vk helpers (find memory type, load shader module)
+  curve_rasterizer.*       # CurveRasterizer: tiling+coverage compute rasterizer
+  msdf_renderer.*          # MsdfTextRenderer: MSDF glyph-quad graphics pipeline
+  log.hh utf8.hh           # logging shim, UTF-8 decoding
+cmake/VfeShaders.cmake     # reusable slangc→SPIR-V compile function (vfe_compile_slang)
+shaders_src/               # shared Slang sources (6 font shaders)
+platform/
+  android/                 # self-contained Gradle demo: gradlew, build.gradle,
+                           #   settings.gradle, install/logcat/screenshot .bat,
+                           #   CMake entry, main/app/demo .cc, android_platform.*
+                           #   (AndroidAssetReader over AAssetManager), app/ module
+third_party/
+  freetype/  msdfgen/      # submodules — the only vendored copies
+tools/                     # offline host tools (desktop, no Vulkan/windowing)
+  atlas_gen/               # bakes font.msdf + atlas.rgba (OpenType MATH cracked by hand)
+  min_text_size/           # min device-pixel size a font renders at (emits header for hosts)
+  msdf_readability/        # smallest readable size of an MSDF bake vs FreeType reference
+```
 
-| File | Role |
-|------|------|
-| `main.cc` | Android NDK `android_main()` entry; event loop, window lifecycle, input |
-| `app.hh/cc` | Vulkan bootstrap (instance → surface → device → swapchain → pipeline → render pass); orchestrates Renderer, Font, Demo |
-| `renderer.hh/cc` | Manages GPU buffers and descriptor sets; dispatches tiling + coverage compute shaders; writes to output image |
-| `font.hh/cc` | Wraps FreeType; converts glyphs to `CurveRecord` structs (cubic Béziers + metadata) |
-| `glyphs.hh/cc` | Hardcoded fallback glyphs (digits/letters) used when FreeType is unavailable |
-| `demo.hh/cc` | Builds the scene's curve list from font + screen dimensions; rebuilds on resize |
+Rules of the structure:
+- **Core never includes platform SDK headers.** Platform needs go through `core/asset_reader.hh` (`AssetReader::read`) — the engine's only seam; it never creates instances/surfaces/swapchains (hosts pass `VkDevice`/`VkPhysicalDevice` in). Android implements the seam in `platform/android/android_platform.{hh,cc}`; desktop hosts/tools can use the bundled `FileByteReader`.
+- The two GPU units are independent classes: `CurveRasterizer` (curve compute path) and `MsdfTextRenderer` (MSDF text path), sharing only the `gpu_util` free functions. Vulkan handles are private; hosts talk to the narrow public API.
+- The platform folder owns its CMake entry: `platform/android/CMakeLists.txt` (reached via `platform/android/app/build.gradle` → `externalNativeBuild.cmake.path "../CMakeLists.txt"`). It `add_subdirectory`s `core/`; there is no root CMakeLists.
+- Consumers (e.g. vk_canvas) `add_subdirectory(<engine>/core)` and link `vk_font_core`, which PUBLIC-exposes the headers and the FreeType/msdfgen link chain.
 
-### Rendering Pipeline
+## MSDF atlas pipeline (producer + consumer, both in this repo)
 
-1. **CPU side**: FreeType → `Font::emit()` → list of `CurveRecord` (max 8 192, 20 floats each)
-2. **Tiling pass** (`tiling.slang`): Each curve writes itself into the tiles (16×16 px) it overlaps
-3. **Coverage pass** (`coverage.slang`): Each tile integrates its curves to produce a coverage value
-4. **Composite pass**: Fullscreen quad samples the coverage image and writes to the swapchain
+- **Runtime reader**: `core/msdf.cc` — `MsdfFont::load` reads the pre-baked `font.msdf`
+  (v2 binary) + `atlas.rgba`; `MsdfFont::generate` is a dynamic fallback that rasterises
+  MSDFs at runtime via msdfgen; `addStyle` appends extra faces into the shared atlas.
+- **Offline baker**: `tools/atlas_gen/` — `pwsh tools/atlas_gen/build.ps1` →
+  `tools/atlas_gen/build/atlas_gen.exe`; feed it 4 OTFs (roman/bold/italic/math — the
+  Latin Modern set is bundled in `tools/atlas_gen/fonts/`, GUST Font License) and it
+  emits `font.msdf` + `atlas.rgba`. Density via `ATLAS_EM`/`ATLAS_AW` env vars.
+- The writer (`atlas_gen.cc`) and reader (`msdf.cc`) must stay byte-for-byte in sync on
+  the v2 format — bump the version word if it ever changes.
 
-### Key Constants (renderer.hh)
-- Max curves: 8 192
-- Floats per curve: 20
-- Tile size: 16×16 pixels
+## Rendering Pipeline (curve path)
 
-## Project Configuration
+1. **CPU side**: FreeType → `Font::emitGlyph/emitString` → list of `CurveRecord` (max 8 192, 20 floats each)
+2. **Tiling pass** (`tiling.slang`): each curve writes itself into the 16×16 px tiles it overlaps
+3. **Coverage pass** (`coverage.slang`): each tile integrates its curves into a coverage value
+4. **Composite pass**: fullscreen quad samples the coverage image into the swapchain
+
+Key constants live on `CurveRasterizer` (`core/curve_rasterizer.hh`): `MAX_CURVES` 8 192, `CURVE_FLOATS` 20, `TILE_SIZE` 16.
+
+## Project Configuration (Android demo)
 
 - **App ID**: `io.nava.vkfont`
 - **Native library**: `vk_font` (loaded by `NativeActivity`)

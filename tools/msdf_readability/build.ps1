@@ -9,8 +9,17 @@ $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $build = Join-Path $here "build"
 
-$vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars — edit this script to point at your VS install." }
+# Locate vcvars64.bat via vswhere (any VS edition with the C++ desktop tools).
+$vcvars = $null
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path $vswhere) {
+    $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+    if ($vsPath) {
+        $candidate = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+        if (Test-Path $candidate) { $vcvars = $candidate }
+    }
+}
+if (-not $vcvars) { throw "vcvars64.bat not found via vswhere — install VS Build Tools with the C++ desktop workload." }
 
 $cfg = "cmake -S `"$here`" -B `"$build`" -G Ninja -DCMAKE_BUILD_TYPE=Release"
 $bld = "cmake --build `"$build`""

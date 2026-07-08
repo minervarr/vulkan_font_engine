@@ -1,5 +1,5 @@
 #include "glyphs.hh"
-#include "renderer.hh"
+#include "curve_rasterizer.hh"
 #include <algorithm>
 #include <cctype>
 
@@ -296,7 +296,7 @@ void pushCurve(std::vector<float>& out,
                float r, float g, float bb, float aa, float lineWidth,
                float minX, float minY, float maxX, float maxY) {
   size_t n = out.size();
-  out.resize(n + Renderer::CURVE_FLOATS, 0.0f);
+  out.resize(n + CurveRasterizer::CURVE_FLOATS, 0.0f);
   // [0-4]: type + params (a,b,c,d); [5-8]: reserved for cubic P2/P3 (stay 0)
   out[n+ 0] = type; out[n+ 1] = a;   out[n+ 2] = b;   out[n+ 3] = c;
   out[n+ 4] = d;    out[n+ 5] = e;

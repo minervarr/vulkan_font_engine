@@ -10,9 +10,12 @@
 #define LOGE(...) VFE_LOGE("Msdf", __VA_ARGS__)
 
 namespace {
-std::vector<uint8_t> readAsset(const AssetLoader& loader, const char* path) {
-  std::vector<uint8_t> buf = loader(path);
-  if (buf.empty()) { LOGE("cannot open asset %s", path); }
+std::vector<uint8_t> readAsset(AssetReader& reader, const char* path) {
+  std::vector<uint8_t> buf;
+  if (!reader.read(path, buf) || buf.empty()) {
+    LOGE("cannot open asset %s", path);
+    buf.clear();
+  }
   return buf;
 }
 
@@ -29,9 +32,9 @@ float    rdF32(const uint8_t*& p) { float v;    std::memcpy(&v, p, 4); p += 4; r
 static constexpr uint32_t kFontText = 0;
 static constexpr uint32_t kFontMath = 2;
 
-bool MsdfFont::load(const AssetLoader& loader, const char* metricsPath,
+bool MsdfFont::load(AssetReader& reader, const char* metricsPath,
                     const char* atlasPath) {
-  std::vector<uint8_t> meta = readAsset(loader, metricsPath);
+  std::vector<uint8_t> meta = readAsset(reader, metricsPath);
   if (meta.size() < 40) { LOGE("metrics too small"); return false; }
 
   const uint8_t* p = meta.data();
@@ -123,7 +126,7 @@ bool MsdfFont::load(const AssetLoader& loader, const char* metricsPath,
   }
   hasMath_ = (cn > 0 || vcount > 0);
 
-  atlas_ = readAsset(loader, atlasPath);
+  atlas_ = readAsset(reader, atlasPath);
   if (atlas_.size() != (size_t)atlasW_ * atlasH_ * 4) {
     LOGE("atlas size %zu != %ux%u*4", atlas_.size(), atlasW_, atlasH_);
     atlas_.clear();
@@ -309,14 +312,14 @@ bool MsdfFont::saveCache(const char* cachePath) {
   return f.good();
 }
 
-bool MsdfFont::generate(const AssetLoader& loader, const char* fontPath, const char* cachePath) {
+bool MsdfFont::generate(AssetReader& reader, const char* fontPath, const char* cachePath) {
   if (cachePath && loadCache(cachePath)) {
     LOGI("MsdfFont::generate loaded from cache: %s", cachePath);
     return true;
   }
 
   LOGI("MsdfFont::generate starting for %s", fontPath);
-  std::vector<uint8_t> fontData = readAsset(loader, fontPath);
+  std::vector<uint8_t> fontData = readAsset(reader, fontPath);
   if (fontData.empty()) { LOGI("readAsset failed"); return false; }
 
   msdfgen::FreetypeHandle* ft = msdfgen::initializeFreetype();
@@ -436,10 +439,10 @@ bool MsdfFont::generate(const AssetLoader& loader, const char* fontPath, const c
   return true;
 }
 
-bool MsdfFont::addStyle(const AssetLoader& loader, const char* fontPath, FontStyle style) {
+bool MsdfFont::addStyle(AssetReader& reader, const char* fontPath, FontStyle style) {
   if (atlas_.empty() || atlasW_ == 0) { LOGE("addStyle: call generate() first"); return false; }
 
-  std::vector<uint8_t> fontData = readAsset(loader, fontPath);
+  std::vector<uint8_t> fontData = readAsset(reader, fontPath);
   if (fontData.empty()) return false;
 
   msdfgen::FreetypeHandle* ft = msdfgen::initializeFreetype();

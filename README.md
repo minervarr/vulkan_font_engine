@@ -12,5 +12,5 @@ It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
 without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
 PURPOSE. See the GNU Affero General Public License for more details.
 
-Note: the bundled FreeType source (under `app/src/main/freetype/`) remains under
+Note: the bundled FreeType source (under `third_party/freetype/`) remains under
 its own FreeType License (FTL) / GPLv2 terms, which are GPLv3-compatible.

@@ -1,11 +1,3 @@
-[submodule "app/src/main/freetype"]
-	path = app/src/main/freetype
-	url = https://github.com/freetype/freetype.git
-	shallow = true
-[submodule "app/src/main/msdfgen"]
-	path = app/src/main/msdfgen
-	url = https://github.com/Chlumsky/msdfgen.git
-	shallow = true
 [submodule "third_party/freetype"]
 	path = third_party/freetype
 	url = https://github.com/freetype/freetype.git

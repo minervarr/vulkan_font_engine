@@ -21,9 +21,9 @@ endif()
 # Normalise the in-tree dependency locations (relative to this file). Both live
 # in this same engine repo: the vendored FreeType submodule and vendored msdfgen.
 get_filename_component(FREETYPE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/main/freetype" ABSOLUTE)
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/freetype" ABSOLUTE)
 get_filename_component(MSDFGEN_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/main/msdfgen" ABSOLUTE)
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/msdfgen" ABSOLUTE)
 
 # ── FreeType: build the vendored copy with no external codec deps. ──
 set(FT_DISABLE_ZLIB     ON CACHE BOOL "" FORCE)

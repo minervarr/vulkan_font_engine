@@ -1,6 +1,6 @@
 # Platform-agnostic font engine, built as the vk_font_core static library.
 # No platform SDK headers here — Android/desktop asset loading goes through the
-# AssetLoader callback (asset_loader.hh), never AAssetManager directly.
+# AssetReader seam (asset_reader.hh), never AAssetManager directly.
 
 set(THIRD_PARTY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
 
@@ -32,7 +32,9 @@ add_library(vk_font_core STATIC
     font.cc
     glyphs.cc
     msdf.cc
-    renderer.cc
+    gpu_util.cc
+    curve_rasterizer.cc
+    msdf_renderer.cc
 )
 
 target_include_directories(vk_font_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

@@ -22,9 +22,9 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 get_filename_component(FREETYPE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/main/freetype" ABSOLUTE)
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/freetype" ABSOLUTE)
 get_filename_component(MSDFGEN_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../app/src/main/msdfgen" ABSOLUTE)
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/msdfgen" ABSOLUTE)
 
 set(FT_DISABLE_ZLIB     ON CACHE BOOL "" FORCE)
 set(FT_DISABLE_BZIP2    ON CACHE BOOL "" FORCE)
