@@ -207,7 +207,7 @@ bool MsdfFont::loadCache(const char* cachePath) {
   if (magic != 0x4D534446) return false; // 'MSDF'
   uint32_t version = 0;
   f.read(reinterpret_cast<char*>(&version), sizeof(version));
-  if (version != 4) return false;  // bumped when generate() or MsdfGlyph layout changes (v4: added italic field)
+  if (version != 7) return false;  // v7: EM 100->40 (fixes minified-text aliasing)
 
   f.read(reinterpret_cast<char*>(&atlasW_), sizeof(atlasW_));
   f.read(reinterpret_cast<char*>(&atlasH_), sizeof(atlasH_));
@@ -235,6 +235,27 @@ bool MsdfFont::loadCache(const char* cachePath) {
     }
   }
 
+  // addStyle()'s data: byKey_ (all styles) + styleCmap_ per style.
+  uint32_t byKeyCount = 0;
+  f.read(reinterpret_cast<char*>(&byKeyCount), sizeof(byKeyCount));
+  for (uint32_t i = 0; i < byKeyCount; ++i) {
+    uint32_t key;
+    MsdfGlyph g;
+    f.read(reinterpret_cast<char*>(&key), sizeof(key));
+    f.read(reinterpret_cast<char*>(&g), sizeof(g));
+    byKey_[key] = g;
+  }
+  for (int s = 0; s < kFontStyleCount; ++s) {
+    uint32_t cmapCount = 0;
+    f.read(reinterpret_cast<char*>(&cmapCount), sizeof(cmapCount));
+    for (uint32_t i = 0; i < cmapCount; ++i) {
+      uint32_t cp, key;
+      f.read(reinterpret_cast<char*>(&cp), sizeof(cp));
+      f.read(reinterpret_cast<char*>(&key), sizeof(key));
+      styleCmap_[s][cp] = key;
+    }
+  }
+
   return f.good();
 }
 
@@ -244,7 +265,7 @@ bool MsdfFont::saveCache(const char* cachePath) {
   if (!f) return false;
 
   uint32_t magic = 0x4D534446;
-  uint32_t version = 4;
+  uint32_t version = 7;
   f.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
   f.write(reinterpret_cast<const char*>(&version), sizeof(version));
   f.write(reinterpret_cast<const char*>(&atlasW_), sizeof(atlasW_));
@@ -265,6 +286,24 @@ bool MsdfFont::saveCache(const char* cachePath) {
     MsdfGlyph g = pair.second;
     f.write(reinterpret_cast<const char*>(&cp), sizeof(cp));
     f.write(reinterpret_cast<const char*>(&g), sizeof(g));
+  }
+
+  uint32_t byKeyCount = byKey_.size();
+  f.write(reinterpret_cast<const char*>(&byKeyCount), sizeof(byKeyCount));
+  for (const auto& pair : byKey_) {
+    uint32_t key = pair.first;
+    MsdfGlyph g = pair.second;
+    f.write(reinterpret_cast<const char*>(&key), sizeof(key));
+    f.write(reinterpret_cast<const char*>(&g), sizeof(g));
+  }
+  for (int s = 0; s < kFontStyleCount; ++s) {
+    uint32_t cmapCount = styleCmap_[s].size();
+    f.write(reinterpret_cast<const char*>(&cmapCount), sizeof(cmapCount));
+    for (const auto& pair : styleCmap_[s]) {
+      uint32_t cp = pair.first, key = pair.second;
+      f.write(reinterpret_cast<const char*>(&cp), sizeof(cp));
+      f.write(reinterpret_cast<const char*>(&key), sizeof(key));
+    }
   }
 
   return f.good();
@@ -289,11 +328,18 @@ bool MsdfFont::generate(const AssetLoader& loader, const char* fontPath, const c
   msdfgen::getFontMetrics(metrics, fontHandle);
   LOGI("Metrics: emSize=%f", metrics.emSize);
   
-  distanceRange_ = 4.0f;
-  // Atlas texels per em. MSDF stays crisp at any size, but more texels per glyph
-  // means sharper corners when text is magnified — e.g. the large display value
-  // on a high-DPI (2K) screen. 64 trades ~2.5x the atlas area of 40 for that.
-  sizePxEm_ = 64.0f;
+  // Atlas texels per em. The fragment shader (msdf_frag.slang) takes a single
+  // bilinear tap per pixel — correct for magnification (MSDF's whole point),
+  // but a high EM baked for a use case that shows big magnified text (e.g.
+  // the offline atlas_gen baker's calculator display) becomes a MINIFICATION
+  // problem here: this app only ever draws 11-18px UI text, so EM=100 meant
+  // every glyph was sampled at ~6-9x minification, which a single bilinear
+  // tap can't represent without shimmering/aliasing ("low quality" text,
+  // worse the more of it is on screen at once). 40 keeps the smallest text
+  // (11px) to a mild ~3.6x minification while staying well above the
+  // largest text (18px) for magnification headroom.
+  sizePxEm_ = 40.0f;
+  distanceRange_ = sizePxEm_ * 0.1f;  // matches atlas_gen's RANGE=EM/10 convention
   lineHeight_ = metrics.lineHeight / metrics.emSize;
   ascender_ = metrics.ascenderY / metrics.emSize;
   descender_ = metrics.descenderY / metrics.emSize;
@@ -339,7 +385,7 @@ bool MsdfFont::generate(const AssetLoader& loader, const char* fontPath, const c
     cells.push_back({cp, shape, bounds, w, h, 0, 0, advance});
   }
 
-  int curX = 0, curY = 0, rowH = 0, AW = 1024;  // wider sheet keeps it from getting too tall at higher em
+  int curX = 0, curY = 0, rowH = 0, AW = 2048;  // wider sheet accommodates larger cells at EM=100
   for (auto& c : cells) {
     if (curX + c.w > AW) { curX = 0; curY += rowH + 2; rowH = 0; }
     c.ax = curX; c.ay = curY;
@@ -387,6 +433,106 @@ bool MsdfFont::generate(const AssetLoader& loader, const char* fontPath, const c
   msdfgen::destroyFont(fontHandle);
   msdfgen::deinitializeFreetype(ft);
   LOGI("Dynamic MSDF atlas generated: %dx%d", atlasW_, atlasH_);
+  return true;
+}
+
+bool MsdfFont::addStyle(const AssetLoader& loader, const char* fontPath, FontStyle style) {
+  if (atlas_.empty() || atlasW_ == 0) { LOGE("addStyle: call generate() first"); return false; }
+
+  std::vector<uint8_t> fontData = readAsset(loader, fontPath);
+  if (fontData.empty()) return false;
+
+  msdfgen::FreetypeHandle* ft = msdfgen::initializeFreetype();
+  if (!ft) return false;
+  msdfgen::FontHandle* fontHandle = msdfgen::loadFontData(ft, fontData.data(), fontData.size());
+  if (!fontHandle) { msdfgen::deinitializeFreetype(ft); return false; }
+  msdfgen::FontMetrics metrics;
+  msdfgen::getFontMetrics(metrics, fontHandle);
+
+  std::vector<uint32_t> chars;
+  for (uint32_t c = 0x20; c <= 0x7E; c++) chars.push_back(c);
+  for (uint32_t c = 0xA1; c <= 0xFF; c++) chars.push_back(c);
+  uint32_t extras[] = {0x152, 0x153, 0x178, 0x20AC, 0x2212, 0x221A, 0x03C0, 0x03B8};
+  for (uint32_t c : extras) chars.push_back(c);
+
+  struct Cell { uint32_t cp; msdfgen::Shape shape; msdfgen::Shape::Bounds bounds; int w, h, ax, ay; double advance; };
+  std::vector<Cell> cells;
+
+  const uint32_t styleId = static_cast<uint32_t>(style);
+  double scale = sizePxEm_ / metrics.emSize;
+
+  for (uint32_t cp : chars) {
+    msdfgen::Shape shape;
+    double advance = 0;
+    if (!msdfgen::loadGlyph(shape, fontHandle, cp, &advance)) {
+      MsdfGlyph g; g.advance = advance / metrics.emSize; g.hasGlyph = false;
+      uint32_t key = (styleId << 24) | cp;
+      byKey_[key] = g;
+      styleCmap_[styleId][cp] = key;
+      continue;
+    }
+    shape.normalize();
+    shape.orientContours();
+    msdfgen::edgeColoringSimple(shape, 3.0);
+    msdfgen::Shape::Bounds bounds = shape.getBounds();
+    int w = 0, h = 0;
+    if (bounds.l < bounds.r && bounds.b < bounds.t) {
+      w = std::ceil((bounds.r - bounds.l) * scale + 2.0 * distanceRange_);
+      h = std::ceil((bounds.t - bounds.b) * scale + 2.0 * distanceRange_);
+    } else {
+      bounds.l = bounds.b = bounds.r = bounds.t = 0;
+    }
+    cells.push_back({cp, shape, bounds, w, h, 0, 0, advance});
+  }
+
+  // Pack the new cells into fresh rows appended below the existing atlas —
+  // existing glyphs (any prior style, including Roman) keep their absolute
+  // atlasL/T/R/B pixel coords, which stay valid since row-major data below
+  // atlasH_ is untouched by the resize() below.
+  int curX = 0, curY = atlasH_, rowH = 0;
+  for (auto& c : cells) {
+    if (curX + c.w > (int)atlasW_) { curX = 0; curY += rowH + 2; rowH = 0; }
+    c.ax = curX; c.ay = curY;
+    curX += c.w + 2;
+    if (c.h > rowH) rowH = c.h;
+  }
+  uint32_t newAtlasH = curY + rowH;
+  atlas_.resize((size_t)atlasW_ * newAtlasH * 4, 0);
+
+  for (auto& c : cells) {
+    if (c.w > 0 && c.h > 0) {
+      msdfgen::Bitmap<float, 3> msdf(c.w, c.h);
+      msdfgen::Vector2 translate(-c.bounds.l + distanceRange_/scale, -c.bounds.b + distanceRange_/scale);
+      msdfgen::generateMSDF(msdf, c.shape, distanceRange_ / scale, msdfgen::Vector2(scale), translate);
+      for (int y = 0; y < c.h; y++) {
+        for (int x = 0; x < c.w; x++) {
+          int dst = ((c.ay + y) * (int)atlasW_ + (c.ax + x)) * 4;
+          auto px = msdf(x, c.h - 1 - y);
+          atlas_[dst]   = msdfgen::pixelFloatToByte(px[0]);
+          atlas_[dst+1] = msdfgen::pixelFloatToByte(px[1]);
+          atlas_[dst+2] = msdfgen::pixelFloatToByte(px[2]);
+          atlas_[dst+3] = 255;
+        }
+      }
+    }
+    MsdfGlyph g;
+    g.advance = c.advance / metrics.emSize;
+    g.hasGlyph = true;
+    g.planeL = c.bounds.l / metrics.emSize - distanceRange_ / sizePxEm_;
+    g.planeT = -c.bounds.t / metrics.emSize - distanceRange_ / sizePxEm_;
+    g.planeR = g.planeL + c.w / sizePxEm_;
+    g.planeB = g.planeT + c.h / sizePxEm_;
+    g.atlasL = c.ax; g.atlasT = c.ay; g.atlasR = c.ax + c.w; g.atlasB = c.ay + c.h;
+    uint32_t key = (styleId << 24) | c.cp;
+    byKey_[key] = g;
+    styleCmap_[styleId][c.cp] = key;
+  }
+
+  atlasH_ = newAtlasH;
+
+  msdfgen::destroyFont(fontHandle);
+  msdfgen::deinitializeFreetype(ft);
+  LOGI("MSDF style %u added: atlas now %ux%u", styleId, atlasW_, atlasH_);
   return true;
 }
 

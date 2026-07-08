@@ -112,6 +112,19 @@ class MsdfFont {
 
   bool load(const AssetLoader& loader, const char* metricsPath, const char* atlasPath);
   bool generate(const AssetLoader& loader, const char* fontPath, const char* cachePath = nullptr);
+  // Bakes an additional face into the SAME shared atlas (appended as new rows,
+  // existing glyphs untouched) and registers it under `style`, the same
+  // (byKey_ / styleCmap_) contract Canvas::textStyled() already reads via
+  // keyForStyle()/glyphByKey() — see msdf.cc for details. Must be called
+  // after generate() (which must run first: it sets distanceRange_/sizePxEm_
+  // and creates the base atlas_ this appends to) and before the Renderer
+  // uploads the atlas texture (Renderer::initMsdf), or the added rows won't
+  // be on the GPU. Persisted by loadCache()/saveCache() alongside the base font.
+  bool addStyle(const AssetLoader& loader, const char* fontPath, FontStyle style);
+  // True if addStyle() (or a loaded cache that already baked it) has content
+  // for this style — lets a caller skip a redundant addStyle() rebake after a
+  // cache hit that already included it.
+  bool hasStyle(FontStyle style) const { return !styleCmap_[static_cast<int>(style)].empty(); }
   bool loadCache(const char* cachePath);
   bool saveCache(const char* cachePath);
   bool valid() const { return !atlas_.empty() && !glyphs_.empty(); }
