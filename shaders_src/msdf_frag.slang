@@ -1,8 +1,12 @@
-// MSDF text: reconstructs a crisp, anti-aliased glyph edge from the multi-channel
-// signed distance field (median of RGB), per Chlumsky.
+// MSDF/MTSDF text: reconstructs a crisp, anti-aliased glyph edge from the
+// multi-channel signed distance field (median of RGB), per Chlumsky. When the
+// atlas is MTSDF (alpha = TRUE single-channel SDF; push.mtsdf == 1), heavily
+// minified glyphs blend toward that true SDF — median(RGB) develops channel-
+// conflict speckles below atlas resolution, the true SDF never does.
 struct Push {
   float2 screen;
   float  pxRange;
+  float  mtsdf;      // 1 = alpha is a true SDF (runtime MTSDF atlas), else 0
   float2 atlasSize;
   float2 scroll;     // (unused in fragment; keeps push layout identical)
 };
@@ -21,7 +25,7 @@ struct PSIn {
 
 [shader("fragment")]
 float4 main(PSIn i) : SV_Target {
-  float3 msd = msdf.Sample(i.uv).rgb;
+  float4 msd = msdf.Sample(i.uv);
   float  sd  = median(msd.r, msd.g, msd.b);
 
   // Canonical Chlumsky screen-px-range: convert the distance field's texel range to
@@ -32,7 +36,16 @@ float4 main(PSIn i) : SV_Target {
   // (shimmer) when the glyph is minified below the atlas resolution.
   float2 unitRange     = push.pxRange / push.atlasSize;
   float2 screenTexSize = 1.0 / max(fwidth(i.uv), 1e-8);
-  float  screenPxRange = max(0.5 * dot(unitRange, screenTexSize), 1.0);
+  float  rawRange      = 0.5 * dot(unitRange, screenTexSize);
+  float  screenPxRange = max(rawRange, 1.0);
+
+  // MTSDF small-size cleanup: once the field spans under ~2 screen px the
+  // median's channel conflicts show as speckles; the alpha channel's true
+  // SDF is artifact-free (its only cost — slightly rounded corners — is
+  // invisible this small). Gated on push.mtsdf so pre-baked RGB-only
+  // atlases (constant alpha) stay pixel-exact.
+  float t = push.mtsdf * clamp(2.0 - rawRange, 0.0, 1.0);
+  sd = lerp(sd, msd.a, t);
 
   float screenPxDist = screenPxRange * (sd - 0.5);
   float a = clamp(screenPxDist + 0.5, 0.0, 1.0);

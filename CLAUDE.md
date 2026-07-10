@@ -19,6 +19,11 @@ cd platform/android
 pwsh tools/atlas_gen/build.ps1
 pwsh tools/min_text_size/build.ps1
 pwsh tools/msdf_readability/build.ps1
+
+# Tests: CPU-side reference port of the tiling/coverage compute shaders,
+# checked against hand-verified geometric ground truth (no GPU needed).
+# Exits nonzero on any real failure.
+pwsh tools/coverage_test/build.ps1
 ```
 
 **Prerequisites:**
@@ -26,7 +31,7 @@ pwsh tools/msdf_readability/build.ps1
 - CMake 3.22.1+
 - FreeType and msdfgen — vendored as submodules under `third_party/` (init submodules first)
 - Slang compiler (`slangc`) from the Vulkan SDK — resolved from `$VULKAN_SDK` (override with `-DVFE_SLANGC=...`); required for recompiling shaders
-- No tests to run; the demo app has no test framework
+- `tools/coverage_test` is the only test suite (host-only, no framework/deps beyond the STL) — everything else is manual/visual (the Android demo)
 
 ## Shader Compilation
 
@@ -64,6 +69,8 @@ tools/                     # offline host tools (desktop, no Vulkan/windowing)
   atlas_gen/               # bakes font.msdf + atlas.rgba (OpenType MATH cracked by hand)
   min_text_size/           # min device-pixel size a font renders at (emits header for hosts)
   msdf_readability/        # smallest readable size of an MSDF bake vs FreeType reference
+  coverage_test/           # CPU-side reference port of tiling.slang/coverage.slang, tested
+                           #   against hand-verified geometry — the engine's only test suite
 ```
 
 Rules of the structure:
@@ -91,7 +98,7 @@ Rules of the structure:
 3. **Coverage pass** (`coverage.slang`): each tile integrates its curves into a coverage value
 4. **Composite pass**: fullscreen quad samples the coverage image into the swapchain
 
-Key constants live on `CurveRasterizer` (`core/curve_rasterizer.hh`): `MAX_CURVES` 8 192, `CURVE_FLOATS` 20, `TILE_SIZE` 16.
+Key constants live on `CurveRasterizer` (`core/curve_rasterizer.hh`): `MAX_CURVES` 8 192, `CURVE_FLOATS` 20, `TILE_SIZE` 16, `MAX_WINDING_PER_TILE` 256 (must match `shaders_src/tiling.slang`/`coverage.slang`'s `MAX_PER_WIND_TILE` — see that file's comment: this is a per-tile-row-cell capacity on winding/glyph-fill curves, and silently drops registrations past it, which can flip fill parity for a busy scanline; `tools/coverage_test` proves this and documents that raising the cap mitigates but doesn't eliminate the risk).
 
 ## Project Configuration (Android demo)
 

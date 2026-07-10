@@ -121,22 +121,69 @@ class MsdfFont {
   // uploads the atlas texture (Renderer::initMsdf), or the added rows won't
   // be on the GPU. Persisted by loadCache()/saveCache() alongside the base font.
   bool addStyle(AssetReader& reader, const char* fontPath, FontStyle style);
+
+  // Bakes glyphs for specific codepoints from an external font into the
+  // SAME shared default-face table (glyphs_/fast_) that generate() itself
+  // populates — not a styled slot, so Canvas::textStyled()'s existing
+  // "keyForStyle() miss -> fall back to the default face" path (see
+  // vk_canvas/core/canvas.cc) picks these up for Bold/Italic/Math text too,
+  // with no Canvas changes needed. Used to add script coverage (Cyrillic,
+  // Greek, CJK, …) the primary font (Latin Modern) doesn't have, without
+  // re-baking the whole atlas. Codepoints already resolvable with a real
+  // glyph are skipped (so calling this with several fallback fonts in
+  // priority order — try font A's coverage, then font B for whatever A
+  // didn't have — costs nothing extra for codepoints an earlier call
+  // already covered). Appends new atlas rows exactly like addStyle();
+  // caller must re-run Renderer::initMsdf() afterward to push the grown
+  // atlas to the GPU (see player_window.cpp). Returns how many codepoints
+  // were newly baked (0 if none of `codepoints` had a glyph in this font,
+  // or all were already covered).
+  int bakeCodepoints(AssetReader& reader, const char* fontPath,
+                     const std::vector<uint32_t>& codepoints);
   // True if addStyle() (or a loaded cache that already baked it) has content
   // for this style — lets a caller skip a redundant addStyle() rebake after a
   // cache hit that already included it.
   bool hasStyle(FontStyle style) const { return !styleCmap_[static_cast<int>(style)].empty(); }
   bool loadCache(const char* cachePath);
   bool saveCache(const char* cachePath);
-  bool valid() const { return !atlas_.empty() && !glyphs_.empty(); }
+  // Valid = metrics usable for measuring/layout. Deliberately NOT tied to the
+  // CPU atlas pixels being resident: releaseAtlasPixels() frees those after
+  // the GPU upload, and layout/measure only needs the glyph tables.
+  bool valid() const { return !glyphs_.empty() && atlasW_ > 0 && atlasH_ > 0; }
+
+  // The atlas pixel buffer is only needed twice: to upload the texture to the
+  // GPU, and as the append target when baking more glyphs. Between those
+  // moments it's dead weight (~8 MB for a fully-baked atlas) duplicating the
+  // GPU copy in host RAM — release it once uploaded, and re-hydrate from the
+  // disk cache before any re-bake (addStyle/bakeCodepoints APPEND to it).
+  void releaseAtlasPixels() { atlas_.clear(); atlas_.shrink_to_fit(); }
+  bool atlasResident() const { return !atlas_.empty(); }
+  // Re-reads ONLY the raw atlas bytes from a saveCache() file into atlas_
+  // (metrics stay as-is — they never left). No-op if already resident.
+  bool ensureAtlasLoaded(const char* cachePath);
 
   uint32_t atlasW() const { return atlasW_; }
   uint32_t atlasH() const { return atlasH_; }
+  // True when the atlas's alpha channel carries a real single-channel SDF
+  // (runtime generate()/v8 cache — see generateMTSDF in msdf.cc). False for
+  // pre-baked load() atlases whose alpha is a constant 255; renderers gate
+  // their small-size median→trueSDF blend on this so those stay pixel-exact.
+  bool isMtsdf() const { return isMtsdf_; }
   const std::vector<uint8_t>& atlas() const { return atlas_; }
   float distanceRange() const { return distanceRange_; }
   // The MSDF distance-field margin baked into every glyph's plane box, in EM. The
   // true ink edges are plane{L,T} + pad and plane{R,B} − pad. Needed for pixel-
   // exact joins (e.g. attaching the radical vinculum to the surd's true peak).
   float glyphPadEm() const { return sizePxEm_ > 0.0f ? distanceRange_ / sizePxEm_ : 0.0f; }
+
+  // True if `cp` already resolves to a real (non-blank) glyph in the shared
+  // default-face table — i.e. bakeCodepoints() doesn't need to be asked for
+  // it again. Used to find which codepoints in a freshly-rescanned library
+  // are genuinely new before spending a bake+GPU-reupload cycle on them.
+  bool hasCodepoint(uint32_t cp) const {
+    const MsdfGlyph* g = lookup(cp);
+    return g && g->hasGlyph;
+  }
 
   float advance(uint32_t cp, float sizePx) const;
   float textWidth(std::string_view s, float sizePx) const;
@@ -212,6 +259,7 @@ class MsdfFont {
   bool      fastHas_[kFastCount] = {};
   std::vector<uint8_t> atlas_;
   uint32_t atlasW_ = 0, atlasH_ = 0;
+  bool isMtsdf_ = false;   // see isMtsdf()
   float distanceRange_ = 4.0f, sizePxEm_ = 40.0f;
   float lineHeight_ = 1.2f, ascender_ = 0.0f, descender_ = 0.0f;
 

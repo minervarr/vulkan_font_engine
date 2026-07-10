@@ -18,9 +18,9 @@ struct PushConstants {
 [[vk::push_constant]] ConstantBuffer<PushConstants> push;
 
 static const uint TILE_STRIDE       = 97;    // 1 count + 96 curve indices
-static const uint WIND_STRIDE       = 65;    // 1 count + 64 winding indices
+static const uint WIND_STRIDE       = 257;   // 1 count + 256 winding indices
 static const uint MAX_PER_TILE      = 96;    // must match OverlayRasterizer::MAX_CURVES_PER_TILE
-static const uint MAX_PER_WIND_TILE = 64;
+static const uint MAX_PER_WIND_TILE = 256;   // must match coverage.slang + host (see its comment)
 
 [numthreads(64, 1, 1)]
 void main(uint3 dispatchId : SV_DispatchThreadID)

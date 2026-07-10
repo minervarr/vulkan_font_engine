@@ -20,9 +20,19 @@ struct PushConstants {
 [[vk::push_constant]] ConstantBuffer<PushConstants> push;
 
 static const uint TILE_STRIDE       = 97;    // 1 count + 96 curve indices per SDF tile
-static const uint WIND_STRIDE       = 65;    // 1 count + 64 winding indices per winding-tile
+static const uint WIND_STRIDE       = 257;   // 1 count + 256 winding indices per winding-tile
 static const uint MAX_PER_TILE      = 96u;   // must match tiling.slang + host
-static const uint MAX_PER_WIND_TILE = 64u;
+// Raised from 64: a busy tile-row cell (many curve edges whose bounding
+// boxes' rightmost tile all fall in the same 16px column) can silently drop
+// registrations past capacity — the InterlockedAdd counter in tiling.slang
+// isn't capped, only which indices get WRITTEN are, so overflow drops
+// individual curves rather than whole shapes. Dropping one half of two
+// curves that should cancel (e.g. adjoining edges of a glyph) flips winding
+// parity for everything to their left on that scanline — see
+// tools/coverage_test's Test D, which reproduces this concretely. 256 makes
+// real-world triggering far less likely; it is a mitigation, not a proof of
+// impossibility — the underlying capacity is still finite.
+static const uint MAX_PER_WIND_TILE = 256u;
 
 // ── Robust winding-crossing helpers ─────────────────────────────────────────
 //

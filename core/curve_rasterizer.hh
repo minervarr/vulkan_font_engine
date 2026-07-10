@@ -20,7 +20,10 @@ class CurveRasterizer {
   // RIGHTMOST X overlap. The coverage shader walks tile columns from the
   // pixel's own column rightward, so curves whose rightmost tile is left of the
   // pixel are out of reach of the rightward ray and skipped for free.
-  static constexpr uint32_t MAX_WINDING_PER_TILE = 64;
+  // See shaders_src/coverage.slang's MAX_PER_WIND_TILE comment: raised from
+  // 64 after tools/coverage_test proved silent registration drops past
+  // capacity can flip winding parity for a busy tile-row cell.
+  static constexpr uint32_t MAX_WINDING_PER_TILE = 256;
   static constexpr uint32_t WIND_STRIDE_U32      = MAX_WINDING_PER_TILE + 1;
 
   void init(VkDevice device, VkPhysicalDevice physicalDevice,

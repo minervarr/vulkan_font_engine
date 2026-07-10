@@ -20,6 +20,9 @@ void MsdfTextRenderer::init(VkDevice device, VkPhysicalDevice physicalDevice,
 void MsdfTextRenderer::createResources(VkRenderPass renderPass,
                                        const MsdfFont& font, int w) {
   if (!font.valid()) { LOGE("MSDF font invalid (weight %d); skipping", w); return; }
+  // valid() no longer implies the CPU atlas pixels are resident (they can be
+  // released after upload) — this path memcpys them, so check explicitly.
+  if (font.atlas().empty()) { LOGE("MSDF atlas pixels not resident (weight %d); skipping", w); return; }
   if (w < 0 || w >= MAX_FONT_WEIGHTS) { LOGE("Invalid weight index %d", w); return; }
 
   atlas_w_ [w] = font.atlasW();

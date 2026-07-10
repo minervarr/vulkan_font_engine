@@ -2,6 +2,7 @@
 struct Push {
   float2 screen;     // framebuffer size in px
   float  pxRange;    // atlas distance range (px)
+  float  mtsdf;      // 1 = alpha channel is a true SDF (MTSDF atlas); was pad
   float2 atlasSize;  // atlas texture size in px
   float2 scroll;     // px offset applied to vertex positions (scroll the layer)
 };

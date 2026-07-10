@@ -3,7 +3,9 @@
 #include "utf8.hh"
 #include "log.hh"
 
+#include <atomic>
 #include <cstring>
+#include <thread>
 #include <utility>
 
 #define LOGI(...) VFE_LOGI("Msdf", __VA_ARGS__)
@@ -22,6 +24,35 @@ std::vector<uint8_t> readAsset(AssetReader& reader, const char* path) {
 // Little-endian readers over a byte cursor.
 uint32_t rdU32(const uint8_t*& p) { uint32_t v; std::memcpy(&v, p, 4); p += 4; return v; }
 float    rdF32(const uint8_t*& p) { float v;    std::memcpy(&v, p, 4); p += 4; return v; }
+
+// Fan `work(i)` for i in [0, count) across hardware threads. Used for the
+// per-cell msdfgen::generateMSDF raster loops: each cell's distance field is
+// independent computation and each writes a disjoint atlas rect, so the only
+// requirement on callers is that `work` touches no shared mutable state
+// beyond those disjoint pixels. FreeType glyph loading must NOT go through
+// here (FT_Face is not thread-safe) — load shapes serially first, then bulk-
+// rasterize. std::thread rather than std::execution because the NDK's libc++
+// doesn't ship the parallel algorithms (this file also builds for Android).
+template <typename Fn>
+void parallelForCells(size_t count, const Fn& work) {
+  unsigned hw = std::thread::hardware_concurrency();
+  size_t nThreads = hw ? hw : 4;
+  if (nThreads > count) nThreads = count;
+  if (nThreads <= 1) {
+    for (size_t i = 0; i < count; i++) work(i);
+    return;
+  }
+  std::atomic<size_t> next{0};
+  std::vector<std::thread> pool;
+  pool.reserve(nThreads);
+  for (size_t t = 0; t < nThreads; t++) {
+    pool.emplace_back([&]() {
+      for (size_t i; (i = next.fetch_add(1, std::memory_order_relaxed)) < count; )
+        work(i);
+    });
+  }
+  for (auto& th : pool) th.join();
+}
 }  // namespace
 
 // font.msdf v2 (magic 0x4644534D, version word = 2): multi-font, GID-addressed,
@@ -210,7 +241,7 @@ bool MsdfFont::loadCache(const char* cachePath) {
   if (magic != 0x4D534446) return false; // 'MSDF'
   uint32_t version = 0;
   f.read(reinterpret_cast<char*>(&version), sizeof(version));
-  if (version != 7) return false;  // v7: EM 100->40 (fixes minified-text aliasing)
+  if (version != 8) return false;  // v8: MTSDF (alpha = true SDF); v7 was EM 100->40
 
   f.read(reinterpret_cast<char*>(&atlasW_), sizeof(atlasW_));
   f.read(reinterpret_cast<char*>(&atlasH_), sizeof(atlasH_));
@@ -259,7 +290,40 @@ bool MsdfFont::loadCache(const char* cachePath) {
     }
   }
 
+  isMtsdf_ = f.good();  // v8 cache => MTSDF atlas (alpha = true SDF)
   return f.good();
+}
+
+bool MsdfFont::ensureAtlasLoaded(const char* cachePath) {
+  if (!atlas_.empty()) return true;
+  if (!cachePath) return false;
+  std::ifstream f(cachePath, std::ios::binary);
+  if (!f) return false;
+
+  // Same header walk as loadCache(), but only the atlas block is consumed —
+  // the glyph tables are still resident from the original load/generate.
+  uint32_t magic = 0, version = 0;
+  f.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+  f.read(reinterpret_cast<char*>(&version), sizeof(version));
+  if (magic != 0x4D534446 || version != 8) return false;
+
+  uint32_t w = 0, h = 0;
+  float em = 0, dr = 0;
+  f.read(reinterpret_cast<char*>(&w), sizeof(w));
+  f.read(reinterpret_cast<char*>(&h), sizeof(h));
+  f.read(reinterpret_cast<char*>(&em), sizeof(em));
+  f.read(reinterpret_cast<char*>(&dr), sizeof(dr));
+  // The cache must describe the atlas this font's resident metrics point
+  // into — a stale/foreign cache would give glyphs wrong UVs.
+  if (w != atlasW_ || h != atlasH_) return false;
+
+  uint32_t atlasSize = 0;
+  f.read(reinterpret_cast<char*>(&atlasSize), sizeof(atlasSize));
+  if (atlasSize != atlasW_ * atlasH_ * 4u) return false;
+  atlas_.resize(atlasSize);
+  f.read(reinterpret_cast<char*>(atlas_.data()), atlasSize);
+  if (!f.good()) { atlas_.clear(); return false; }
+  return true;
 }
 
 bool MsdfFont::saveCache(const char* cachePath) {
@@ -268,7 +332,7 @@ bool MsdfFont::saveCache(const char* cachePath) {
   if (!f) return false;
 
   uint32_t magic = 0x4D534446;
-  uint32_t version = 7;
+  uint32_t version = 8;  // v8: MTSDF atlas (alpha = true SDF)
   f.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
   f.write(reinterpret_cast<const char*>(&version), sizeof(version));
   f.write(reinterpret_cast<const char*>(&atlasW_), sizeof(atlasW_));
@@ -399,24 +463,33 @@ bool MsdfFont::generate(AssetReader& reader, const char* fontPath, const char* c
   atlasH_ = curY + rowH;
   atlas_.resize(atlasW_ * atlasH_ * 4, 0);
 
-  for (auto& c : cells) {
-    if (c.w > 0 && c.h > 0) {
-      msdfgen::Bitmap<float, 3> msdf(c.w, c.h);
-      double scale = sizePxEm_ / metrics.emSize;
-      msdfgen::Vector2 translate(-c.bounds.l + distanceRange_/scale, -c.bounds.b + distanceRange_/scale);
-      msdfgen::generateMSDF(msdf, c.shape, distanceRange_ / scale, msdfgen::Vector2(scale), translate);
-      
-      for (int y = 0; y < c.h; y++) {
-        for (int x = 0; x < c.w; x++) {
-          int dst = ((c.ay + y) * atlasW_ + (c.ax + x)) * 4;
-          auto px = msdf(x, c.h - 1 - y); // msdfgen is Y-up, vulkan texture Y-down
-          atlas_[dst]   = msdfgen::pixelFloatToByte(px[0]);
-          atlas_[dst+1] = msdfgen::pixelFloatToByte(px[1]);
-          atlas_[dst+2] = msdfgen::pixelFloatToByte(px[2]);
-          atlas_[dst+3] = 255;
-        }
+  // Raster phase runs across all cores (see parallelForCells): each cell
+  // computes its own distance field and writes only its own atlas rect.
+  // Metadata insertion (the glyphs_/fast_ maps) stays serial below.
+  parallelForCells(cells.size(), [&](size_t ci) {
+    auto& c = cells[ci];
+    if (c.w <= 0 || c.h <= 0) return;
+    msdfgen::Bitmap<float, 4> msdf(c.w, c.h);
+    double scale = sizePxEm_ / metrics.emSize;
+    msdfgen::Vector2 translate(-c.bounds.l + distanceRange_/scale, -c.bounds.b + distanceRange_/scale);
+    msdfgen::generateMTSDF(msdf, c.shape, distanceRange_ / scale, msdfgen::Vector2(scale), translate);
+
+    for (int y = 0; y < c.h; y++) {
+      for (int x = 0; x < c.w; x++) {
+        int dst = ((c.ay + y) * atlasW_ + (c.ax + x)) * 4;
+        auto px = msdf(x, c.h - 1 - y); // msdfgen is Y-up, vulkan texture Y-down
+        atlas_[dst]   = msdfgen::pixelFloatToByte(px[0]);
+        atlas_[dst+1] = msdfgen::pixelFloatToByte(px[1]);
+        atlas_[dst+2] = msdfgen::pixelFloatToByte(px[2]);
+        // MTSDF: alpha carries the TRUE single-channel SDF (was a wasted
+        // constant 255). The shader blends toward it when glyphs are
+        // minified below atlas resolution, where median(RGB) speckles.
+        atlas_[dst+3] = msdfgen::pixelFloatToByte(px[3]);
       }
     }
+  });
+
+  for (auto& c : cells) {
     MsdfGlyph g;
     g.advance = c.advance / metrics.emSize;
     g.hasGlyph = true;
@@ -435,7 +508,8 @@ bool MsdfFont::generate(AssetReader& reader, const char* fontPath, const char* c
 
   msdfgen::destroyFont(fontHandle);
   msdfgen::deinitializeFreetype(ft);
-  LOGI("Dynamic MSDF atlas generated: %dx%d", atlasW_, atlasH_);
+  isMtsdf_ = true;  // freshly baked via generateMTSDF
+  LOGI("Dynamic MTSDF atlas generated: %dx%d", atlasW_, atlasH_);
   return true;
 }
 
@@ -502,22 +576,29 @@ bool MsdfFont::addStyle(AssetReader& reader, const char* fontPath, FontStyle sty
   uint32_t newAtlasH = curY + rowH;
   atlas_.resize((size_t)atlasW_ * newAtlasH * 4, 0);
 
-  for (auto& c : cells) {
-    if (c.w > 0 && c.h > 0) {
-      msdfgen::Bitmap<float, 3> msdf(c.w, c.h);
-      msdfgen::Vector2 translate(-c.bounds.l + distanceRange_/scale, -c.bounds.b + distanceRange_/scale);
-      msdfgen::generateMSDF(msdf, c.shape, distanceRange_ / scale, msdfgen::Vector2(scale), translate);
-      for (int y = 0; y < c.h; y++) {
-        for (int x = 0; x < c.w; x++) {
-          int dst = ((c.ay + y) * (int)atlasW_ + (c.ax + x)) * 4;
-          auto px = msdf(x, c.h - 1 - y);
-          atlas_[dst]   = msdfgen::pixelFloatToByte(px[0]);
-          atlas_[dst+1] = msdfgen::pixelFloatToByte(px[1]);
-          atlas_[dst+2] = msdfgen::pixelFloatToByte(px[2]);
-          atlas_[dst+3] = 255;
-        }
+  // Same parallel raster / serial metadata split as generate().
+  parallelForCells(cells.size(), [&](size_t ci) {
+    auto& c = cells[ci];
+    if (c.w <= 0 || c.h <= 0) return;
+    msdfgen::Bitmap<float, 4> msdf(c.w, c.h);
+    msdfgen::Vector2 translate(-c.bounds.l + distanceRange_/scale, -c.bounds.b + distanceRange_/scale);
+    msdfgen::generateMTSDF(msdf, c.shape, distanceRange_ / scale, msdfgen::Vector2(scale), translate);
+    for (int y = 0; y < c.h; y++) {
+      for (int x = 0; x < c.w; x++) {
+        int dst = ((c.ay + y) * (int)atlasW_ + (c.ax + x)) * 4;
+        auto px = msdf(x, c.h - 1 - y);
+        atlas_[dst]   = msdfgen::pixelFloatToByte(px[0]);
+        atlas_[dst+1] = msdfgen::pixelFloatToByte(px[1]);
+        atlas_[dst+2] = msdfgen::pixelFloatToByte(px[2]);
+        // MTSDF: alpha carries the TRUE single-channel SDF (was a wasted
+        // constant 255). The shader blends toward it when glyphs are
+        // minified below atlas resolution, where median(RGB) speckles.
+        atlas_[dst+3] = msdfgen::pixelFloatToByte(px[3]);
       }
     }
+  });
+
+  for (auto& c : cells) {
     MsdfGlyph g;
     g.advance = c.advance / metrics.emSize;
     g.hasGlyph = true;
@@ -537,6 +618,114 @@ bool MsdfFont::addStyle(AssetReader& reader, const char* fontPath, FontStyle sty
   msdfgen::deinitializeFreetype(ft);
   LOGI("MSDF style %u added: atlas now %ux%u", styleId, atlasW_, atlasH_);
   return true;
+}
+
+int MsdfFont::bakeCodepoints(AssetReader& reader, const char* fontPath,
+                             const std::vector<uint32_t>& codepoints) {
+  if (atlas_.empty() || atlasW_ == 0) { LOGE("bakeCodepoints: call generate() first"); return 0; }
+
+  std::vector<uint32_t> needed;
+  for (uint32_t cp : codepoints)
+    if (!hasCodepoint(cp)) needed.push_back(cp);
+  if (needed.empty()) return 0;
+
+  std::vector<uint8_t> fontData = readAsset(reader, fontPath);
+  if (fontData.empty()) return 0;
+
+  msdfgen::FreetypeHandle* ft = msdfgen::initializeFreetype();
+  if (!ft) return 0;
+  msdfgen::FontHandle* fontHandle = msdfgen::loadFontData(ft, fontData.data(), fontData.size());
+  if (!fontHandle) { msdfgen::deinitializeFreetype(ft); return 0; }
+  msdfgen::FontMetrics metrics;
+  msdfgen::getFontMetrics(metrics, fontHandle);
+  double scale = sizePxEm_ / metrics.emSize;
+
+  struct Cell { uint32_t cp; msdfgen::Shape shape; msdfgen::Shape::Bounds bounds; int w, h; double advance; };
+  std::vector<Cell> cells;
+
+  for (uint32_t cp : needed) {
+    msdfgen::Shape shape;
+    double advance = 0;
+    if (!msdfgen::loadGlyph(shape, fontHandle, cp, &advance)) continue;  // this font doesn't have it either — leave for the next fallback font (or stays unresolved, same zero-width behavior as a missing lookup())
+    shape.normalize();
+    shape.orientContours();
+    msdfgen::edgeColoringSimple(shape, 3.0);
+    msdfgen::Shape::Bounds bounds = shape.getBounds();
+    int w = 0, h = 0;
+    if (bounds.l < bounds.r && bounds.b < bounds.t) {
+      w = std::ceil((bounds.r - bounds.l) * scale + 2.0 * distanceRange_);
+      h = std::ceil((bounds.t - bounds.b) * scale + 2.0 * distanceRange_);
+    } else {
+      bounds.l = bounds.b = bounds.r = bounds.t = 0;
+    }
+    cells.push_back({cp, shape, bounds, w, h, advance});
+  }
+
+  if (cells.empty()) {
+    msdfgen::destroyFont(fontHandle);
+    msdfgen::deinitializeFreetype(ft);
+    return 0;
+  }
+
+  // Same row-append packing as addStyle(): new rows below the existing
+  // atlas, prior glyphs' absolute atlas coords untouched.
+  std::vector<int> ax(cells.size()), ay(cells.size());
+  int curX = 0, curY = atlasH_, rowH = 0;
+  for (size_t i = 0; i < cells.size(); i++) {
+    auto& c = cells[i];
+    if (curX + c.w > (int)atlasW_) { curX = 0; curY += rowH + 2; rowH = 0; }
+    ax[i] = curX; ay[i] = curY;
+    curX += c.w + 2;
+    if (c.h > rowH) rowH = c.h;
+  }
+  uint32_t newAtlasH = curY + rowH;
+  atlas_.resize((size_t)atlasW_ * newAtlasH * 4, 0);
+
+  // Same parallel raster / serial metadata split as generate().
+  parallelForCells(cells.size(), [&](size_t i) {
+    auto& c = cells[i];
+    if (c.w <= 0 || c.h <= 0) return;
+    msdfgen::Bitmap<float, 4> msdf(c.w, c.h);
+    msdfgen::Vector2 translate(-c.bounds.l + distanceRange_/scale, -c.bounds.b + distanceRange_/scale);
+    msdfgen::generateMTSDF(msdf, c.shape, distanceRange_ / scale, msdfgen::Vector2(scale), translate);
+    for (int y = 0; y < c.h; y++) {
+      for (int x = 0; x < c.w; x++) {
+        int dst = ((ay[i] + y) * (int)atlasW_ + (ax[i] + x)) * 4;
+        auto px = msdf(x, c.h - 1 - y);
+        atlas_[dst]   = msdfgen::pixelFloatToByte(px[0]);
+        atlas_[dst+1] = msdfgen::pixelFloatToByte(px[1]);
+        atlas_[dst+2] = msdfgen::pixelFloatToByte(px[2]);
+        // MTSDF: alpha carries the TRUE single-channel SDF (was a wasted
+        // constant 255). The shader blends toward it when glyphs are
+        // minified below atlas resolution, where median(RGB) speckles.
+        atlas_[dst+3] = msdfgen::pixelFloatToByte(px[3]);
+      }
+    }
+  });
+
+  int newlyBaked = 0;
+  for (size_t i = 0; i < cells.size(); i++) {
+    auto& c = cells[i];
+    MsdfGlyph g;
+    g.advance = c.advance / metrics.emSize;
+    g.hasGlyph = true;
+    g.planeL = c.bounds.l / metrics.emSize - distanceRange_ / sizePxEm_;
+    g.planeT = -c.bounds.t / metrics.emSize - distanceRange_ / sizePxEm_;
+    g.planeR = g.planeL + c.w / sizePxEm_;
+    g.planeB = g.planeT + c.h / sizePxEm_;
+    g.atlasL = (float)ax[i]; g.atlasT = (float)ay[i];
+    g.atlasR = (float)(ax[i] + c.w); g.atlasB = (float)(ay[i] + c.h);
+    glyphs_[c.cp] = g;
+    if (c.cp < kFastCount) { fast_[c.cp] = g; fastHas_[c.cp] = true; }
+    newlyBaked++;
+  }
+
+  atlasH_ = newAtlasH;
+
+  msdfgen::destroyFont(fontHandle);
+  msdfgen::deinitializeFreetype(ft);
+  LOGI("MSDF baked %d fallback codepoints from %s: atlas now %ux%u", newlyBaked, fontPath, atlasW_, atlasH_);
+  return newlyBaked;
 }
 
 float MsdfFont::advance(uint32_t cp, float sizePx) const {
