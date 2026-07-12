@@ -644,9 +644,21 @@ int MsdfFont::bakeCodepoints(AssetReader& reader, const char* fontPath,
   std::vector<Cell> cells;
 
   for (uint32_t cp : needed) {
+    // msdfgen::loadGlyph(unicode) resolves via FT_Get_Char_Index, then
+    // unconditionally FT_Load_Glyphs whatever index comes back -- including
+    // index 0 (.notdef) when the codepoint isn't in this font's cmap at all.
+    // FT_Load_Glyph(face, 0, ...) never errors, so loadGlyph(unicode) would
+    // return true with the font's own .notdef shape, silently baking a wrong
+    // placeholder glyph (and, via the newlyBaked>0 caller contract, stopping
+    // the fallback-font search before a font that actually has the glyph
+    // gets tried). Check glyph coverage explicitly first so a font that
+    // doesn't have `cp` is correctly skipped, per this function's documented
+    // "leave for the next fallback font" contract below.
+    msdfgen::GlyphIndex gi;
+    if (!msdfgen::getGlyphIndex(gi, fontHandle, cp) || gi.getIndex() == 0) continue;
     msdfgen::Shape shape;
     double advance = 0;
-    if (!msdfgen::loadGlyph(shape, fontHandle, cp, &advance)) continue;  // this font doesn't have it either — leave for the next fallback font (or stays unresolved, same zero-width behavior as a missing lookup())
+    if (!msdfgen::loadGlyph(shape, fontHandle, gi, &advance)) continue;  // this font doesn't have it either — leave for the next fallback font (or stays unresolved, same zero-width behavior as a missing lookup())
     shape.normalize();
     shape.orientContours();
     msdfgen::edgeColoringSimple(shape, 3.0);
