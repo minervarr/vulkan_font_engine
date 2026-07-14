@@ -83,17 +83,21 @@ Rules of the structure:
 
 Two independent atlas paths exist — don't confuse them:
 
-- **Offline-baked pair** (`font.msdf` + `atlas.rgba`, v2 binary): produced by
-  `tools/atlas_gen/`, read by `MsdfFont::load()`. RGB-only; alpha is a constant 255.
-  Used by hosts that ship a pre-baked atlas (the Android demo's assets).
+- **Offline-baked pair** (`font.msdf` + `atlas.rgba`, v3 binary): produced by
+  `tools/atlas_gen/`, read by `MsdfFont::load()` (which accepts v2 or v3).
+  v3 is MTSDF — alpha carries a true single-channel SDF, same as the runtime
+  cache; v2 was RGB-only with constant-255 alpha. `isMtsdf()` reports true
+  only for v3. Used by hosts that ship a pre-baked atlas (the Android demo's
+  assets).
   - `pwsh tools/atlas_gen/build.ps1` → `tools/atlas_gen/build/atlas_gen.exe`; feed it
     4 OTFs (roman/bold/italic/math — the Latin Modern set is bundled in
     `tools/atlas_gen/fonts/`, GUST Font License) and it emits `font.msdf` + `atlas.rgba`.
     Density via `ATLAS_EM`/`ATLAS_AW` env vars.
   - The writer (`atlas_gen.cc`) and reader (`msdf.cc`) must stay byte-for-byte in sync
-    on the v2 format — bump the version word if it ever changes.
+    on the format — bump the version word if it ever changes (v2→v3 changed only
+    the version word and the meaning of the sheet's alpha bytes).
 
-- **Runtime-generated single-file cache** (magic `'MSDF'`, currently **v8**):
+- **Runtime-generated single-file cache** (magic `'MSDF'`, currently **v9**):
   produced and consumed entirely by `msdf.cc` — `MsdfFont::generate(reader, fontPath,
   cachePath)` rasterizes via msdfgen on first run and `saveCache()`s the result;
   subsequent runs `loadCache()` it back (`generate()` tries the cache first,
@@ -102,14 +106,25 @@ Two independent atlas paths exist — don't confuse them:
   glyphs into the SAME atlas and must be re-saved by the caller if they added
   anything (`hasStyle()`/`hasCodepoint()` let a caller skip a redundant rebake
   after a cache hit that already covered it).
+  - **v9 = v8 + bottom-anchored plane metadata and a denser bake** (EM 40→96,
+    sheet width 2048→4096, packing fail-fasts if the sheet exceeds 4096px
+    tall): plane boxes are derived from the raster's own bottom anchor
+    (`-bounds.b`), so the per-glyph `ceil()` slack in the cell height no
+    longer shifts ink upward relative to the metadata (was visible as
+    baseline jitter between adjacent letters). The same anchoring fix is
+    applied in `tools/atlas_gen` — the offline pair stays format v2 (byte
+    layout unchanged, plane values corrected), so shipped `font.msdf`/
+    `atlas.rgba` pairs must be regenerated.
   - **v8 = MTSDF**: generated via `msdfgen::generateMTSDF` (not `generateMSDF`) into
     a `Bitmap<float,4>` — RGB is the standard multi-channel field (median-of-3 for
     sharp corners), and **alpha now carries a true single-channel SDF** (previously
     a wasted constant 255). `MsdfFont::isMtsdf()` reports which kind is loaded —
-    true only for a v8 cache or a fresh `generate()` bake; false for the offline
-    v2 `load()` path above (whose alpha really is constant). Consumers gate any
-    alpha-channel use on this flag. Renderer-side: `Renderer`'s MSDF push constant
-    carries this flag through to `msdf_frag.slang`, which blends the primary
+    true for a v8/v9 cache, a fresh `generate()` bake, or an offline v3 pair;
+    false only for a legacy v2 `load()` (whose alpha really is constant).
+    Consumers gate any alpha-channel use on this flag. Renderer-side:
+    `MsdfTextRenderer::createResources` snapshots it per weight (`mtsdf_[w]`)
+    and `draw()` passes it as the MSDF push constant's `mtsdf` word through to
+    `msdf_frag.slang`, which blends the primary
     `median(rgb)` edge toward the true SDF once the field spans under ~2 screen
     pixels — exactly where the median develops channel-conflict speckles on small
     text; the true SDF has none (its only tradeoff, slightly rounded corners, is

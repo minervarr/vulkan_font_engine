@@ -62,7 +62,12 @@ void initParams() {
   if (const char* e = std::getenv("ATLAS_AW")) { int v = std::atoi(e); if (v > 0) AW = v; }
   RANGE = EM * 0.1;  // keep RANGE/EM == 0.1 regardless of EM
 }
-constexpr uint32_t VERSION = 2;  // font.msdf format version
+// v3 = MTSDF: the sheet's alpha channel carries a TRUE single-channel SDF
+// (was a constant 255 in v2), enabling the fragment shader's small-size
+// speckle cleanup (msdf_frag.slang's push.mtsdf blend) for pre-baked atlases
+// too, matching the runtime cache's v8+ MTSDF bake. Field order is unchanged
+// from v2 — only the version word and the alpha bytes differ.
+constexpr uint32_t VERSION = 3;  // font.msdf format version
 
 // Font (== named style) ids. One atlas, glyphs keyed by (font_id, gid) via key().
 constexpr uint32_t F_TEXT = 0;    // lmroman regular — UI text, digits, function names (upright); the default
@@ -90,7 +95,7 @@ struct Glyph {
   float plane[4];      // em units, y-down (top negative)
   float atlas[4];      // atlas pixels, y from top
   int w, h;
-  std::vector<uint8_t> rgb;  // w*h*3, top-first
+  std::vector<uint8_t> rgba;  // w*h*4, top-first (alpha = true SDF, MTSDF)
 };
 
 Glyph metricsOnly(uint32_t k, double advance) {
@@ -101,7 +106,8 @@ Glyph metricsOnly(uint32_t k, double advance) {
   return g;
 }
 
-// Rasterise one glyph (by GID) of `f` into a true MSDF cell. The atlas rect is
+// Rasterise one glyph (by GID) of `f` into an MTSDF cell (RGB = multi-channel
+// field, alpha = true single-channel SDF). The atlas rect is
 // assigned later by the shelf packer. Mirrors msdf.cc::MsdfFont::generate per-cell.
 Glyph bakeGlyph(const FontAsset& f, uint32_t k, uint16_t gid) {
   msdfgen::Shape shape;
@@ -126,9 +132,9 @@ Glyph bakeGlyph(const FontAsset& f, uint32_t k, uint16_t gid) {
   int h = static_cast<int>(std::ceil((b.t - b.b) * scale + 2.0 * RANGE));
   if (w <= 0 || h <= 0) return metricsOnly(k, advance);
 
-  msdfgen::Bitmap<float, 3> msdf(w, h);
+  msdfgen::Bitmap<float, 4> msdf(w, h);
   msdfgen::Vector2 translate(-b.l + RANGE / scale, -b.b + RANGE / scale);
-  msdfgen::generateMSDF(msdf, shape, RANGE / scale, msdfgen::Vector2(scale), translate);
+  msdfgen::generateMTSDF(msdf, shape, RANGE / scale, msdfgen::Vector2(scale), translate);
 
   // msdfgen output is y-up (font convention) → flip rows so the atlas is top-first.
   Glyph g{};
@@ -138,22 +144,28 @@ Glyph bakeGlyph(const FontAsset& f, uint32_t k, uint16_t gid) {
   g.has = true;
   g.w = w;
   g.h = h;
-  g.rgb.resize(static_cast<size_t>(w) * h * 3);
+  g.rgba.resize(static_cast<size_t>(w) * h * 4);
   for (int j = 0; j < h; j++) {
     int src = h - 1 - j;
     for (int i = 0; i < w; i++) {
       auto px = msdf(i, src);
-      size_t o = (static_cast<size_t>(j) * w + i) * 3;
-      g.rgb[o] = msdfgen::pixelFloatToByte(px[0]);
-      g.rgb[o + 1] = msdfgen::pixelFloatToByte(px[1]);
-      g.rgb[o + 2] = msdfgen::pixelFloatToByte(px[2]);
+      size_t o = (static_cast<size_t>(j) * w + i) * 4;
+      g.rgba[o] = msdfgen::pixelFloatToByte(px[0]);
+      g.rgba[o + 1] = msdfgen::pixelFloatToByte(px[1]);
+      g.rgba[o + 2] = msdfgen::pixelFloatToByte(px[2]);
+      g.rgba[o + 3] = msdfgen::pixelFloatToByte(px[3]);
     }
   }
 
   double planeL = b.l / f.upm - RANGE / EM;
-  double planeT = -(b.t / f.upm) - RANGE / EM;
+  // Anchor the plane to the BOTTOM edge, matching the raster translate
+  // (-b.b + RANGE/scale) above: the ceil() slack in h lands at the top of
+  // the cell, so a top-anchored planeT shifted every glyph's ink up by its
+  // per-glyph fractional remainder (visible baseline jitter). Mirrors the
+  // identical fix in core/msdf.cc.
+  double planeB = -(b.b / f.upm) + RANGE / EM;
   double planeR = planeL + w / EM;
-  double planeB = planeT + h / EM;
+  double planeT = planeB - h / EM;
   g.plane[0] = static_cast<float>(planeL);
   g.plane[1] = static_cast<float>(planeT);
   g.plane[2] = static_cast<float>(planeR);
@@ -439,18 +451,18 @@ int main(int argc, char** argv) {
     int oy = static_cast<int>(g.atlas[1]);
     for (int j = 0; j < g.h; j++) {
       for (int i = 0; i < g.w; i++) {
-        size_t s = (static_cast<size_t>(j) * g.w + i) * 3;
+        size_t s = (static_cast<size_t>(j) * g.w + i) * 4;
         size_t p = (static_cast<size_t>(oy + j) * AW + (ox + i)) * 4;
-        atlas[p] = g.rgb[s];
-        atlas[p + 1] = g.rgb[s + 1];
-        atlas[p + 2] = g.rgb[s + 2];
-        atlas[p + 3] = 255;
+        atlas[p] = g.rgba[s];
+        atlas[p + 1] = g.rgba[s + 1];
+        atlas[p + 2] = g.rgba[s + 2];
+        atlas[p + 3] = g.rgba[s + 3];
       }
     }
   }
   writeFile(argv[6], atlas);
 
-  // ── Metrics + font.msdf v2 header. ──
+  // ── Metrics + font.msdf v3 header. ──
   // Global text metrics come from the TEXT face (font 0) — the line model the UI uses.
   // Read hhea directly so it matches the Rust (ttf-parser) ascender/descender/lineGap.
   const FontAsset& tf = fonts[F_TEXT];
@@ -466,7 +478,7 @@ int main(int argc, char** argv) {
   std::vector<uint8_t> buf;
   // Header.
   putU32(buf, 0x4644534D);  // magic 'MSDF'
-  putU32(buf, VERSION);     // = 2
+  putU32(buf, VERSION);     // = 3 (MTSDF)
   putU32(buf, static_cast<uint32_t>(AW));
   putU32(buf, static_cast<uint32_t>(ah));
   putF32(buf, static_cast<float>(RANGE));

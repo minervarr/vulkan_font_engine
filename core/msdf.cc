@@ -55,9 +55,12 @@ void parallelForCells(size_t count, const Fn& work) {
 }
 }  // namespace
 
-// font.msdf v2 (magic 0x4644534D, version word = 2): multi-font, GID-addressed,
-// with the OpenType MATH payload. See atlas_gen/src/main.rs for the writer; keep
-// the field order in lock-step. Glyphs are keyed by (fontId<<24)|gid; codepoints
+// font.msdf v2/v3 (magic 0x4644534D): multi-font, GID-addressed, with the
+// OpenType MATH payload. See tools/atlas_gen/atlas_gen.cc for the writer; keep
+// the field order in lock-step. v3 == v2 byte-for-byte except the version word
+// and the atlas sheet's alpha channel: v2's alpha is a constant 255, v3's is a
+// TRUE single-channel SDF (MTSDF, same as the runtime v9 cache) — consumers
+// gate alpha use on isMtsdf(). Glyphs are keyed by (fontId<<24)|gid; codepoints
 // reach text glyphs (font 0) through the fast/hash maps and math glyphs (font 2)
 // through mathCmap_.
 static constexpr uint32_t kFontText = 0;
@@ -72,7 +75,11 @@ bool MsdfFont::load(AssetReader& reader, const char* metricsPath,
   uint32_t magic = rdU32(p);
   if (magic != 0x4644534D) { LOGE("bad magic %08x", magic); return false; }
   uint32_t version = rdU32(p);
-  if (version != 2) { LOGE("unsupported font.msdf version %u (want 2)", version); return false; }
+  if (version != 2 && version != 3) {
+    LOGE("unsupported font.msdf version %u (want 2 or 3)", version);
+    return false;
+  }
+  isMtsdf_ = (version == 3);  // v3: sheet alpha is a true SDF (MTSDF)
   atlasW_        = rdU32(p);
   atlasH_        = rdU32(p);
   distanceRange_ = rdF32(p);
@@ -241,7 +248,7 @@ bool MsdfFont::loadCache(const char* cachePath) {
   if (magic != 0x4D534446) return false; // 'MSDF'
   uint32_t version = 0;
   f.read(reinterpret_cast<char*>(&version), sizeof(version));
-  if (version != 8) return false;  // v8: MTSDF (alpha = true SDF); v7 was EM 100->40
+  if (version != 9) return false;  // v9: bottom-anchored planes, EM 40->96, AW 4096; v8 was MTSDF
 
   f.read(reinterpret_cast<char*>(&atlasW_), sizeof(atlasW_));
   f.read(reinterpret_cast<char*>(&atlasH_), sizeof(atlasH_));
@@ -305,7 +312,7 @@ bool MsdfFont::ensureAtlasLoaded(const char* cachePath) {
   uint32_t magic = 0, version = 0;
   f.read(reinterpret_cast<char*>(&magic), sizeof(magic));
   f.read(reinterpret_cast<char*>(&version), sizeof(version));
-  if (magic != 0x4D534446 || version != 8) return false;
+  if (magic != 0x4D534446 || version != 9) return false;
 
   uint32_t w = 0, h = 0;
   float em = 0, dr = 0;
@@ -332,7 +339,7 @@ bool MsdfFont::saveCache(const char* cachePath) {
   if (!f) return false;
 
   uint32_t magic = 0x4D534446;
-  uint32_t version = 8;  // v8: MTSDF atlas (alpha = true SDF)
+  uint32_t version = 9;  // v9: bottom-anchored planes, EM 40->96, AW 4096
   f.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
   f.write(reinterpret_cast<const char*>(&version), sizeof(version));
   f.write(reinterpret_cast<const char*>(&atlasW_), sizeof(atlasW_));
@@ -402,10 +409,13 @@ bool MsdfFont::generate(AssetReader& reader, const char* fontPath, const char* c
   // problem here: this app only ever draws 11-18px UI text, so EM=100 meant
   // every glyph was sampled at ~6-9x minification, which a single bilinear
   // tap can't represent without shimmering/aliasing ("low quality" text,
-  // worse the more of it is on screen at once). 40 keeps the smallest text
-  // (11px) to a mild ~3.6x minification while staying well above the
-  // largest text (18px) for magnification headroom.
-  sizePxEm_ = 40.0f;
+  // worse the more of it is on screen at once). 96 balances both ends for
+  // hosts that show large magnified text (a maximized desktop window draws
+  // ~120px lines, which at the old EM=40 was ~3x past the baked detail —
+  // visibly blocky curves): small 11-18px UI text sits at a manageable
+  // ~5-8x minification (the MTSDF alpha/true-SDF blend in msdf_frag.slang
+  // handles that regime), while 120px text is only mild ~1.25x magnification.
+  sizePxEm_ = 96.0f;
   distanceRange_ = sizePxEm_ * 0.1f;  // matches atlas_gen's RANGE=EM/10 convention
   lineHeight_ = metrics.lineHeight / metrics.emSize;
   ascender_ = metrics.ascenderY / metrics.emSize;
@@ -452,7 +462,9 @@ bool MsdfFont::generate(AssetReader& reader, const char* fontPath, const char* c
     cells.push_back({cp, shape, bounds, w, h, 0, 0, advance});
   }
 
-  int curX = 0, curY = 0, rowH = 0, AW = 2048;  // wider sheet accommodates larger cells at EM=100
+  // 4096 is the minimum maxImageDimension2D every Vulkan device guarantees —
+  // the sheet must never exceed it in either dimension.
+  int curX = 0, curY = 0, rowH = 0, AW = 4096;
   for (auto& c : cells) {
     if (curX + c.w > AW) { curX = 0; curY += rowH + 2; rowH = 0; }
     c.ax = curX; c.ay = curY;
@@ -461,6 +473,12 @@ bool MsdfFont::generate(AssetReader& reader, const char* fontPath, const char* c
   }
   atlasW_ = AW;
   atlasH_ = curY + rowH;
+  if (atlasH_ > 4096) {
+    LOGE("MSDF atlas height %u exceeds the 4096 guaranteed texture limit", atlasH_);
+    msdfgen::destroyFont(fontHandle);
+    msdfgen::deinitializeFreetype(ft);
+    return false;
+  }
   atlas_.resize(atlasW_ * atlasH_ * 4, 0);
 
   // Raster phase runs across all cores (see parallelForCells): each cell
@@ -494,9 +512,14 @@ bool MsdfFont::generate(AssetReader& reader, const char* fontPath, const char* c
     g.advance = c.advance / metrics.emSize;
     g.hasGlyph = true;
     g.planeL = c.bounds.l / metrics.emSize - distanceRange_ / sizePxEm_;
-    g.planeT = -c.bounds.t / metrics.emSize - distanceRange_ / sizePxEm_;
+    // Anchor the plane to the BOTTOM edge, matching the raster translate
+    // (-bounds.b + range/scale) above: the ceil() slack in c.h lands at the
+    // top of the cell, so deriving planeB from planeT (top-anchored) shifted
+    // every glyph's ink up by its per-glyph fractional remainder — visible
+    // baseline jitter between adjacent letters.
+    g.planeB = -c.bounds.b / metrics.emSize + distanceRange_ / sizePxEm_;
     g.planeR = g.planeL + c.w / sizePxEm_;
-    g.planeB = g.planeT + c.h / sizePxEm_;
+    g.planeT = g.planeB - c.h / sizePxEm_;
     g.atlasL = c.ax; g.atlasT = c.ay; g.atlasR = c.ax + c.w; g.atlasB = c.ay + c.h;
     glyphs_[c.cp] = g;
     if (c.cp < kFastCount) fast_[c.cp] = g, fastHas_[c.cp] = true;
@@ -574,6 +597,12 @@ bool MsdfFont::addStyle(AssetReader& reader, const char* fontPath, FontStyle sty
     if (c.h > rowH) rowH = c.h;
   }
   uint32_t newAtlasH = curY + rowH;
+  if (newAtlasH > 4096) {
+    LOGE("MSDF atlas height %u exceeds the 4096 guaranteed texture limit", newAtlasH);
+    msdfgen::destroyFont(fontHandle);
+    msdfgen::deinitializeFreetype(ft);
+    return false;
+  }
   atlas_.resize((size_t)atlasW_ * newAtlasH * 4, 0);
 
   // Same parallel raster / serial metadata split as generate().
@@ -603,9 +632,10 @@ bool MsdfFont::addStyle(AssetReader& reader, const char* fontPath, FontStyle sty
     g.advance = c.advance / metrics.emSize;
     g.hasGlyph = true;
     g.planeL = c.bounds.l / metrics.emSize - distanceRange_ / sizePxEm_;
-    g.planeT = -c.bounds.t / metrics.emSize - distanceRange_ / sizePxEm_;
+    // Bottom-anchored to match the raster translate — see generate().
+    g.planeB = -c.bounds.b / metrics.emSize + distanceRange_ / sizePxEm_;
     g.planeR = g.planeL + c.w / sizePxEm_;
-    g.planeB = g.planeT + c.h / sizePxEm_;
+    g.planeT = g.planeB - c.h / sizePxEm_;
     g.atlasL = c.ax; g.atlasT = c.ay; g.atlasR = c.ax + c.w; g.atlasB = c.ay + c.h;
     uint32_t key = (styleId << 24) | c.cp;
     byKey_[key] = g;
@@ -691,6 +721,12 @@ int MsdfFont::bakeCodepoints(AssetReader& reader, const char* fontPath,
     if (c.h > rowH) rowH = c.h;
   }
   uint32_t newAtlasH = curY + rowH;
+  if (newAtlasH > 4096) {
+    LOGE("MSDF atlas height %u exceeds the 4096 guaranteed texture limit", newAtlasH);
+    msdfgen::destroyFont(fontHandle);
+    msdfgen::deinitializeFreetype(ft);
+    return 0;
+  }
   atlas_.resize((size_t)atlasW_ * newAtlasH * 4, 0);
 
   // Same parallel raster / serial metadata split as generate().
@@ -722,9 +758,10 @@ int MsdfFont::bakeCodepoints(AssetReader& reader, const char* fontPath,
     g.advance = c.advance / metrics.emSize;
     g.hasGlyph = true;
     g.planeL = c.bounds.l / metrics.emSize - distanceRange_ / sizePxEm_;
-    g.planeT = -c.bounds.t / metrics.emSize - distanceRange_ / sizePxEm_;
+    // Bottom-anchored to match the raster translate — see generate().
+    g.planeB = -c.bounds.b / metrics.emSize + distanceRange_ / sizePxEm_;
     g.planeR = g.planeL + c.w / sizePxEm_;
-    g.planeB = g.planeT + c.h / sizePxEm_;
+    g.planeT = g.planeB - c.h / sizePxEm_;
     g.atlasL = (float)ax[i]; g.atlasT = (float)ay[i];
     g.atlasR = (float)(ax[i] + c.w); g.atlasB = (float)(ay[i] + c.h);
     glyphs_[c.cp] = g;

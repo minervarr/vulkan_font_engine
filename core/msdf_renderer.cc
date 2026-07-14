@@ -28,6 +28,7 @@ void MsdfTextRenderer::createResources(VkRenderPass renderPass,
   atlas_w_ [w] = font.atlasW();
   atlas_h_ [w] = font.atlasH();
   px_range_[w] = font.distanceRange();
+  mtsdf_   [w] = font.isMtsdf() ? 1.0f : 0.0f;
 
   // ── Per-weight: atlas image (device-local, sampled) ───────────────────────
   VkImageCreateInfo img{};
@@ -271,7 +272,11 @@ void MsdfTextRenderer::draw(VkCommandBuffer cmd, uint32_t firstVert,
   vkCmdSetScissor (cmd, 0, 1, &sc);
 
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-  float push[8] = {(float)screen_width_, (float)screen_height_, px_range_[w], 0.f,
+  // push.mtsdf: 1 when this weight's atlas alpha is a TRUE single-channel SDF
+  // (runtime MTSDF cache, offline v3 pair) — msdf_frag.slang blends toward it
+  // on heavy minification where median(RGB) speckles. Was hardcoded 0, which
+  // silently disabled that cleanup even for MTSDF atlases.
+  float push[8] = {(float)screen_width_, (float)screen_height_, px_range_[w], mtsdf_[w],
                    (float)atlas_w_[w], (float)atlas_h_[w], scrollX, scrollY};
   vkCmdPushConstants(cmd, pipeline_layout_,
                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

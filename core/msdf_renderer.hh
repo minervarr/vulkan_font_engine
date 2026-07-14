@@ -31,6 +31,14 @@ class MsdfTextRenderer {
     return pipeline_ != VK_NULL_HANDLE &&
            atlas_image_[weightIdx] != VK_NULL_HANDLE;
   }
+  // Keep in sync with the swapchain on resize: the vertex shader converts
+  // pixel coords to clip space with this size, so a stale value CLIPS (in
+  // NDC, before the viewport transform) everything drawn beyond the original
+  // width/height — text past the old extent silently disappears.
+  void setScreenSize(uint32_t screenWidth, uint32_t screenHeight) {
+    screen_width_  = screenWidth;
+    screen_height_ = screenHeight;
+  }
   void uploadGlyphQuads(const float* verts, uint32_t vertCount, int weightIdx = 0);
   uint32_t vertCount(int weightIdx = 0) const { return vert_count_[weightIdx]; }
   // Vertex offset for weight w: w * (MAX_MSDF_VERTS / MAX_FONT_WEIGHTS)
@@ -60,6 +68,7 @@ class MsdfTextRenderer {
   uint32_t         atlas_w_     [MAX_FONT_WEIGHTS] = {};
   uint32_t         atlas_h_     [MAX_FONT_WEIGHTS] = {};
   float            px_range_    [MAX_FONT_WEIGHTS] = {};
+  float            mtsdf_       [MAX_FONT_WEIGHTS] = {};  // 1 = alpha is a true SDF
   uint32_t         vert_count_  [MAX_FONT_WEIGHTS] = {};
 
   // Shared across all weights (one pipeline, one vertex buffer, one layout)
