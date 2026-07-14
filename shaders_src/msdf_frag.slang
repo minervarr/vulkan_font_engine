@@ -44,7 +44,16 @@ float4 main(PSIn i) : SV_Target {
   // SDF is artifact-free (its only cost — slightly rounded corners — is
   // invisible this small). Gated on push.mtsdf so pre-baked RGB-only
   // atlases (constant alpha) stay pixel-exact.
-  float t = push.mtsdf * clamp(2.0 - rawRange, 0.0, 1.0);
+  //
+  // Dense thin-stroked glyphs (CJK/Hangul/Kana) develop median channel-
+  // conflict blobs in their margins over a much wider minification range
+  // than the <2px threshold covers — visible as faint smudges that flicker
+  // with sub-pixel scroll phase. The host tags those glyphs by emitting
+  // vertex alpha just under 1.0 (see the emitter's kTrueSdfAlphaTag); they
+  // render from the true SDF outright. Untagged (Latin) fragments keep the
+  // original formula bit-exactly.
+  bool trueSdfTagged = i.color.a < 0.9995;
+  float t = push.mtsdf * (trueSdfTagged ? 1.0 : clamp(2.0 - rawRange, 0.0, 1.0));
   sd = lerp(sd, msd.a, t);
 
   float screenPxDist = screenPxRange * (sd - 0.5);
