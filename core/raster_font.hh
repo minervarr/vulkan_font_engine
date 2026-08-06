@@ -232,9 +232,45 @@ class RasterFont : public TextFont {
   // (RasterFace::hasCodepoint) rather than cached: a CJK face has tens of
   // thousands of codepoints and only a few hundred are ever wanted.
   struct Face {
-    vfe::RasterFace raster;
+    vfe::RasterFace raster;   // cmap and metric queries — the owning thread
     vfe::KernTable  kern;
+
+    // One rasterizing face per bake worker, opened over the SAME font bytes.
+    // FreeType is not thread-safe per face — every render() calls
+    // FT_Set_Pixel_Sizes, which writes face->size — so a parallel bake needs a
+    // face each. Sharing the bytes means this costs a pair of handles per
+    // worker, not another copy of a 9 MB CJK font. Built on first use.
+    std::vector<vfe::RasterFace> bakeFaces;
   };
+
+  // One glyph waiting to be baked: what to rasterize, which face does it, and
+  // the result. Planning and committing are serial; only rasterize() is not.
+  struct BakeJob {
+    const Face* face = nullptr;
+    FontStyle   style = FontStyle::Roman;
+    int         sizePx = 0;
+    uint32_t    cp = 0;
+    vfe::RasterGlyph glyph;
+    bool        ok = false;
+  };
+
+  // How many threads the bake may use, and how many jobs are held in flight.
+  //
+  // The batch bound is about MEMORY, not scheduling: a rasterized 8K cell is
+  // ~12 KB of coverage, so holding all 15,000 of them at once would be ~180 MB
+  // of transient buffers. A batch at a time keeps that at a few MB while still
+  // giving every core a full slice of work.
+  static uint32_t bakeThreadCount();
+  static constexpr size_t kBakeBatch = 2048;
+
+  // Rasterize every job in [begin, end) in parallel. Pure with respect to the
+  // cache: it touches only the jobs and the per-worker faces.
+  void rasterizeJobs(BakeJob* jobs, size_t count);
+
+  // Place and store one rasterized job. Serial by necessity — the shelf packer
+  // is a single allocator, and commit ORDER is what keeps the atlas layout
+  // deterministic for a given input.
+  bool commitJob(BakeJob& job);
 
   // Both key codecs live in cell_key.hh, where the field positions are derived
   // from declared widths and the round-trips are proved with static_assert.

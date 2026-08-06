@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 // ── Per-size glyph rasterization ────────────────────────────────────────────
@@ -51,6 +52,16 @@ class RasterFace {
   // The bytes must outlive the face — FreeType parses them lazily. RasterFace
   // therefore takes its own copy.
   bool openFromMemory(const uint8_t* data, size_t size);
+
+  // A SECOND, independent FT_Face over the same font bytes.
+  //
+  // FreeType is not thread-safe per face: FT_Set_Pixel_Sizes writes
+  // face->size, and every render() call makes one. So a parallel bake cannot
+  // share a face — it needs one per worker. What it can share is the font
+  // data, which is immutable once loaded and is the only large part; two
+  // faces over one buffer cost a pair of handles, not another copy of a 9 MB
+  // CJK font.
+  bool openSharedWith(const RasterFace& other);
   bool isOpen() const { return face_ != nullptr; }
 
   // True if this face has a real (non-.notdef) glyph for `cp`.
@@ -81,15 +92,21 @@ class RasterFace {
   // em fractions. 0 if not open.
   uint32_t unitsPerEm() const;
 
-  // The raw font bytes, for handing to the GPOS kern parser.
-  const std::vector<uint8_t>& bytes() const { return bytes_; }
+  // The raw font bytes, for handing to the GPOS kern parser. Empty if closed.
+  const std::vector<uint8_t>& bytes() const {
+    static const std::vector<uint8_t> kNone;
+    return bytes_ ? *bytes_ : kNone;
+  }
 
  private:
+  bool openBytes();
   void close();
 
   void* library_ = nullptr;   // FT_Library
   void* face_    = nullptr;   // FT_Face
-  std::vector<uint8_t> bytes_;
+  // Shared so openSharedWith() can hand a second face the same buffer without
+  // copying it, and so the buffer outlives whichever face is destroyed first.
+  std::shared_ptr<const std::vector<uint8_t>> bytes_;
 };
 
 }  // namespace vfe

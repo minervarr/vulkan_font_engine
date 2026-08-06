@@ -4,9 +4,11 @@
 #include "utf8.hh"
 
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 namespace {
 
@@ -246,6 +248,86 @@ void RasterFont::reset() {
   solidX_ = solidY_ = 0;
 }
 
+uint32_t RasterFont::bakeThreadCount() {
+  const unsigned hw = std::thread::hardware_concurrency();
+  if (hw <= 1) return 1;
+  return hw > 16 ? 16u : (uint32_t)hw;   // past this the commit side dominates
+}
+
+void RasterFont::rasterizeJobs(BakeJob* jobs, size_t count) {
+  if (count == 0) return;
+
+  const uint32_t workers =
+      (uint32_t)std::min<size_t>(bakeThreadCount(), count);
+
+  // One rasterizing face per worker, per face involved. Opened lazily and
+  // kept: a bake is not a one-off, and reopening a 9 MB face per batch would
+  // cost more than the batch.
+  auto faceFor_ = [&](const Face* f, uint32_t w) -> const vfe::RasterFace* {
+    Face* mf = const_cast<Face*>(f);
+    if (mf->bakeFaces.size() < workers) {
+      const size_t had = mf->bakeFaces.size();
+      mf->bakeFaces.resize(workers);
+      for (size_t i = had; i < workers; ++i)
+        if (!mf->bakeFaces[i].openSharedWith(mf->raster))
+          VFE_LOGE("Raster", "cannot open a second face for the bake worker");
+    }
+    const vfe::RasterFace& r = mf->bakeFaces[w];
+    return r.isOpen() ? &r : &mf->raster;   // fall back to serial-safe path
+  };
+  for (size_t i = 0; i < count; ++i)
+    if (jobs[i].face) (void)faceFor_(jobs[i].face, 0);   // allocate up front
+
+  auto run = [&](uint32_t w) {
+    for (size_t i = w; i < count; i += workers) {
+      BakeJob& j = jobs[i];
+      if (!j.face) continue;
+      const vfe::RasterFace* r = &j.face->bakeFaces[w];
+      if (!r->isOpen()) r = &j.face->raster;
+      j.ok = r->render(j.cp, j.sizePx, j.glyph);
+    }
+  };
+
+  // One thread means no threads: the single-core path stays exactly what it
+  // was, with no spawn cost and nothing to get wrong.
+  if (workers == 1) { run(0); return; }
+
+  std::vector<std::thread> pool;
+  pool.reserve(workers - 1);
+  for (uint32_t w = 1; w < workers; ++w) pool.emplace_back(run, w);
+  run(0);
+  for (auto& t : pool) t.join();
+}
+
+bool RasterFont::commitJob(BakeJob& job) {
+  if (!job.ok) return false;
+
+  Cell c;
+  c.advance  = job.glyph.advance;
+  c.bearingX = job.glyph.bearingX;
+  c.bearingY = job.glyph.bearingY;
+
+  if (job.glyph.w > 0 && job.glyph.h > 0) {
+    vfe::ShelfPacker::Slot slot;
+    if (!packInto(job.glyph.w, job.glyph.h, slot)) return false;
+    c.hasGlyph = true;
+    c.page   = slot.page;
+    c.atlasX = slot.x;
+    c.atlasY = slot.y;
+    c.w = job.glyph.w;
+    c.h = job.glyph.h;
+    for (int y = 0; y < job.glyph.h; ++y)
+      std::memcpy(atlas_.data() + texelOffset(c.page, c.atlasX, c.atlasY + y),
+                  job.glyph.cov.data() + (size_t)y * job.glyph.w,
+                  (size_t)job.glyph.w);
+  }
+  // else: whitespace, recorded with hasGlyph=false so layout advances the pen
+  // without emitting a quad.
+
+  cells_.emplace(cellKey(job.style, job.sizePx, job.cp), c);
+  return true;
+}
+
 int RasterFont::ensureGlyphs(const std::vector<uint32_t>& cps,
                              const std::vector<int>& sizesPx) {
   for (int s : sizesPx)
@@ -255,11 +337,17 @@ int RasterFont::ensureGlyphs(const std::vector<uint32_t>& cps,
   reserveSolidTexel();   // first, so its position never moves
   const auto t0 = std::chrono::steady_clock::now();
 
-  // Cells are laid out in the sheet as they are baked, so an all-sizes pass
-  // over one codepoint keeps that codepoint's variants near each other. That
-  // is not required for correctness; it just keeps a shelf from mixing a 19px
+  // ── 1. PLAN (serial) ────────────────────────────────────────────────────
+  //
+  // Which cells are missing, and which face serves each. Resolving the face
+  // here rather than in the worker is what keeps FreeType single-threaded per
+  // face: faceFor() queries the cmap through `raster`, the workers rasterize
+  // through `bakeFaces`, and the two never touch the same FT_Face.
+  //
+  // Job ORDER is the atlas layout. An all-sizes pass over one codepoint keeps
+  // that codepoint's variants adjacent, which stops a shelf from mixing a 19px
   // Latin cell with a 44px CJK one and wasting the height difference.
-  int added = 0;
+  std::vector<BakeJob> jobs;
   for (int style = 0; style < kFontStyleCount; ++style) {
     const Face* sf = styles_[style].get();
     if (!sf || !sf->raster.isOpen()) continue;
@@ -277,8 +365,36 @@ int RasterFont::ensureGlyphs(const std::vector<uint32_t>& cps,
 
       for (int sz : sizes_) {
         if (cells_.count(cellKey((FontStyle)style, sz, cp))) continue;
-        if (bakeCell(*use, (FontStyle)style, sz, cp)) added++;
+        BakeJob j;
+        j.face = use;
+        j.style = (FontStyle)style;
+        j.sizePx = sz;
+        j.cp = cp;
+        jobs.push_back(std::move(j));
       }
+    }
+  }
+  if (jobs.empty()) return 0;
+
+  // ── 2. RASTERIZE (parallel) and 3. COMMIT (serial) ──────────────────────
+  //
+  // Rasterizing is ~10-50us a glyph and every glyph is independent, so it is
+  // the whole cost and it parallelises perfectly. Committing is a shelf
+  // placement and a memcpy — microseconds — and must stay serial and IN JOB
+  // ORDER, because the packer is one allocator and the resulting layout has to
+  // be reproducible for a given input.
+  //
+  // This is deliberately not a background thread. Baking off the frame thread
+  // would let the UI draw against a half-filled atlas, i.e. text visibly
+  // appearing in pieces. Making the bake fast keeps every frame complete —
+  // the same reason the whole cache is eager rather than lazy.
+  int added = 0;
+  for (size_t base = 0; base < jobs.size(); base += kBakeBatch) {
+    const size_t n = std::min(kBakeBatch, jobs.size() - base);
+    rasterizeJobs(jobs.data() + base, n);
+    for (size_t i = 0; i < n; ++i) {
+      if (commitJob(jobs[base + i])) added++;
+      jobs[base + i].glyph = vfe::RasterGlyph{};   // release the coverage bytes
     }
   }
 

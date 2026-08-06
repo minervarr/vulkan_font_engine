@@ -52,15 +52,26 @@ bool RasterFace::openFromMemory(const uint8_t* data, size_t size) {
 
   // Our own copy: FT_New_Memory_Face does NOT take ownership and parses
   // lazily, so a caller's temporary buffer would be read after it died.
-  bytes_.assign(data, data + size);
+  bytes_ = std::make_shared<const std::vector<uint8_t>>(data, data + size);
+  return openBytes();
+}
 
+bool RasterFace::openSharedWith(const RasterFace& other) {
+  if (!other.bytes_ || other.bytes_->empty()) return false;
+  close();
+  bytes_ = other.bytes_;   // same buffer, its own FT_Library and FT_Face
+  return openBytes();
+}
+
+// Build an FT_Library + FT_Face over whatever bytes_ already points at.
+bool RasterFace::openBytes() {
   FT_Library l = nullptr;
-  if (FT_Init_FreeType(&l) != 0) { bytes_.clear(); return false; }
+  if (FT_Init_FreeType(&l) != 0) { bytes_.reset(); return false; }
 
   FT_Face f = nullptr;
-  if (FT_New_Memory_Face(l, bytes_.data(), (FT_Long)bytes_.size(), 0, &f) != 0) {
+  if (FT_New_Memory_Face(l, bytes_->data(), (FT_Long)bytes_->size(), 0, &f) != 0) {
     FT_Done_FreeType(l);
-    bytes_.clear();
+    bytes_.reset();
     return false;
   }
   if (FT_Select_Charmap(f, FT_ENCODING_UNICODE) != 0) {
@@ -68,7 +79,7 @@ bool RasterFace::openFromMemory(const uint8_t* data, size_t size) {
     // codepoint lookup, which is the only way this class is used.
     FT_Done_Face(f);
     FT_Done_FreeType(l);
-    bytes_.clear();
+    bytes_.reset();
     return false;
   }
 
