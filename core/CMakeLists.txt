@@ -92,4 +92,19 @@ if(NOT ANDROID AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     else()
         target_compile_options(glyph_raster_test PRIVATE -Wall)
     endif()
+
+    # cell_key_test and shelf_packer_test link NOTHING AT ALL — both headers
+    # are self-contained by design, and that is what lets the two pieces the
+    # raster cache is built on be checked as arithmetic instead of as a
+    # screenshot. Both replaced hand-written bit and shelf bookkeeping that was
+    # silently wrong; see the headers' own comments. Keep them dependency-free.
+    foreach(pure_test cell_key_test shelf_packer_test)
+        add_executable(${pure_test} tests/${pure_test}.cc)
+        target_include_directories(${pure_test} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        if(MSVC)
+            target_compile_options(${pure_test} PRIVATE /W3 /utf-8)
+        else()
+            target_compile_options(${pure_test} PRIVATE -Wall)
+        endif()
+    endforeach()
 endif()

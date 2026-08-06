@@ -1,7 +1,9 @@
 #pragma once
 #include "asset_reader.hh"
+#include "cell_key.hh"
 #include "glyph_raster.hh"
 #include "gpos_kern.hh"
+#include "shelf_packer.hh"
 #include "text_font.hh"
 
 #include <cstdint>
@@ -39,10 +41,40 @@
 
 class RasterFont : public TextFont {
  public:
-  // Atlas sheet width. Height grows in shelves as glyphs are added, and is
-  // held under the 4096 every Vulkan implementation guarantees.
-  static constexpr uint32_t kAtlasW   = 4096;
-  static constexpr uint32_t kAtlasMaxH = 4096;
+  // ── Pages ────────────────────────────────────────────────────────────────
+  //
+  // The atlas is N fixed-size pages, uploaded as the layers of one 2D array
+  // image. It used to be a single 4096-square sheet, and that was a hard
+  // ceiling reached in ordinary use: a raster cell's AREA grows with the
+  // square of the size, so the same library that fits in 8 MB at 1080p wants
+  // four times that at 4K and sixteen at 8K. Measured on the real library, a
+  // 4K capture filled the sheet at 9571 cells and everything after it — most
+  // of the UI's text — simply never got a cell.
+  //
+  // Pages remove the ceiling instead of raising it, and there is no policy cap
+  // on how many there may be: an atlas that refuses to hold what is on screen
+  // is not a budget, it is a bug. The renderer checks the count against the
+  // device's maxImageArrayLayers (guaranteed >= 256, i.e. a gigabyte of pages
+  // before it binds) and says so if a device ever objects.
+  //
+  // 4096 x 1024 R8 = 4 MB a page. Width is the sampler-friendly maximum every
+  // implementation guarantees; the height is a granularity choice. Shelf waste
+  // is about maxCellHeight/pageHeight — ~12% for a 120 px cell at 8K — and a
+  // shorter page would waste proportionally more while a taller one would make
+  // the art window, which needs a few dozen cells, pay for a bigger minimum.
+  static constexpr uint32_t kPageW = 4096;
+  static constexpr uint32_t kPageH = 1024;
+
+  // Transparent margin reserved to the right of and below every cell. One
+  // pixel is enough to stop the linear sampler reaching a neighbour when a
+  // quad lands a hair off its texel grid.
+  static constexpr uint32_t kPad = 1;
+
+  static_assert(vfe::cellkey::kMaxCellPx + kPad <= kPageH,
+                "a cell at the size cap must be placeable in an empty page");
+  static_assert((size_t)kPageW * kPageH % 4 == 0,
+                "VkBufferImageCopy::bufferOffset must be 4-byte aligned, and "
+                "per-layer offsets are multiples of the page size");
 
   // ── Setup ────────────────────────────────────────────────────────────────
 
@@ -93,8 +125,8 @@ class RasterFont : public TextFont {
   //
   // The caller must re-run Renderer::initMsdf() afterwards if this returns
   // nonzero — the atlas it grew is still only on the CPU.
-  int ensureGlyphs(const std::vector<uint32_t>& cps,
-                   const std::vector<int>& sizesPx);
+  [[nodiscard]] int ensureGlyphs(const std::vector<uint32_t>& cps,
+                                 const std::vector<int>& sizesPx);
 
   // ── Misses, and why they are the mechanism rather than a safety net ──────
   //
@@ -119,7 +151,20 @@ class RasterFont : public TextFont {
   // Bake everything recorded, clear the record, and report how many cells were
   // added. Codepoints no registered face can serve are remembered as such so
   // they are not retried every frame forever.
-  int bakeMisses();
+  [[nodiscard]] int bakeMisses();
+
+  // Throw the sheet away and start over, keeping the opened faces.
+  //
+  // This is how the cache stays BOUNDED. Cells are keyed by size, so every
+  // window resize that changes the type roles adds a whole new set and nothing
+  // ever removes the old one. An LRU would work too, and would also mean a
+  // cell could vanish while a quad still referenced it; starting over cannot
+  // do that, and re-baking is only tens of microseconds a glyph.
+  //
+  // Note it clears unservable_ as well. That set is not only "no face has this
+  // codepoint" — bakeMisses() also lands a key there when the sheet had no
+  // ROOM for it, and those are exactly the glyphs a reset exists to recover.
+  void reset();
 
   size_t cellCount() const { return cells_.size(); }
 
@@ -139,10 +184,26 @@ class RasterFont : public TextFont {
   float kernEmStyled(FontStyle s, uint32_t prevCp, uint32_t cp) const override;
   bool  hasCodepoint(uint32_t cp) const override;
 
-  bool valid() const override { return !cells_.empty() && atlasH_ > 0; }
+  // Validity is about the FACES, not about what has been baked yet.
+  //
+  // It used to be `!cells_.empty() && atlasH_ > 0`, and both windows gate
+  // Canvas::useMsdf() on it — so a font with no cells was never given to a
+  // Canvas, therefore never recorded a miss, therefore never baked anything,
+  // therefore stayed invalid. The cache could only ever start because
+  // something else happened to seed it eagerly first.
+  bool valid() const override;
+
+  // A fully opaque texel, for a caller that wants a solid quad out of the
+  // text pipeline (Canvas::quadMsdfRect). False if none has been reserved.
+  bool solidTexel(float& u, float& v) const override;
   const std::vector<uint8_t>& atlas() const override { return atlas_; }
-  uint32_t atlasW() const override { return atlasW_; }
-  uint32_t atlasH() const override { return atlasH_; }
+  // The PAGE size, not the whole sheet's: every page is exactly this, which is
+  // what lets them be the layers of one array image and what lets layoutByKey()
+  // normalise against a constant instead of a moving high-water mark.
+  uint32_t atlasW() const override { return kPageW; }
+  uint32_t atlasH() const override { return kPageH; }
+  uint32_t atlasPages() const override { return packer_.pageCount(); }
+  void takeDirtyPages(std::vector<uint32_t>& out) const override;
   uint32_t atlasChannels() const override { return 1; }   // 8-bit coverage
   TextMode textMode() const override { return TextMode::Raster; }
   float distanceRange() const override { return 0.0f; }   // no field to range
@@ -163,6 +224,7 @@ class RasterFont : public TextFont {
     float advance  = 0.0f;    // px, at this cell's size
     int   bearingX = 0, bearingY = 0;
     int   w = 0, h = 0;
+    uint32_t page = 0;        // which atlas page (array layer)
     uint32_t atlasX = 0, atlasY = 0;
   };
 
@@ -174,28 +236,34 @@ class RasterFont : public TextFont {
     vfe::KernTable  kern;
   };
 
-  // key = style<<56 | sizePx<<32 | codepoint. The pieces never collide:
-  // codepoints stop at 0x10FFFF and a UI size fits in a few bits of the
-  // middle word.
+  // Both key codecs live in cell_key.hh, where the field positions are derived
+  // from declared widths and the round-trips are proved with static_assert.
+  // They were written out by hand here, and the cell key's style bits sat
+  // INSIDE its size field — see that header for what it cost.
   static uint64_t cellKey(FontStyle s, int sizePx, uint32_t cp) {
-    return ((uint64_t)(uint8_t)s << 56) | ((uint64_t)(uint32_t)sizePx << 32) | cp;
+    return vfe::cellkey::encodeCell(s, (uint32_t)sizePx, cp);
   }
-  // The glyph key Canvas passes back through layoutByKey(). Style is offset by
-  // one so a real key is never 0, which keyForStyle() uses to mean "uncovered".
   static uint32_t glyphKey(FontStyle s, uint32_t cp) {
-    return ((uint32_t)((uint8_t)s + 1) << 24) | (cp & 0x00FFFFFFu);
+    return vfe::cellkey::encodeGlyph(s, cp);
   }
-  static FontStyle keyStyle(uint32_t key) {
-    return (FontStyle)(uint8_t)((key >> 24) - 1);
-  }
-  static uint32_t keyCp(uint32_t key) { return key & 0x00FFFFFFu; }
+  static FontStyle keyStyle(uint32_t key) { return vfe::cellkey::glyphStyle(key); }
+  static uint32_t keyCp(uint32_t key) { return vfe::cellkey::glyphCp(key); }
 
   // The one place a float size becomes a cell size. Everything that touches
   // the cache goes through it, so measurement and drawing cannot disagree
   // about which bake they mean.
+  //
+  // The upper clamp is defence in depth, not a design limit: it is what stands
+  // between a corrupt size and FreeType being asked for a bitmap measured in
+  // gigabytes. A clamped size stays SELF-CONSISTENT — measurement and drawing
+  // both land on the same cell — so text drawn past the cap is the wrong size
+  // but never misaligned. Nothing in this app comes close (the largest type
+  // role is ~120 px at 8K).
   static int quantize(float sizePx) {
     int px = (int)(sizePx + 0.5f);
-    return px < 1 ? 1 : px;
+    if (px < 1) return 1;
+    if (px > (int)vfe::cellkey::kMaxCellPx) return (int)vfe::cellkey::kMaxCellPx;
+    return px;
   }
 
   const Cell* find(FontStyle s, int sizePx, uint32_t cp) const {
@@ -212,14 +280,24 @@ class RasterFont : public TextFont {
   const Face* faceFor(FontStyle style, uint32_t cp) const;
 
   bool bakeCell(const Face& f, FontStyle style, int sizePx, uint32_t cp);
-  bool packInto(int w, int h, uint32_t& outX, uint32_t& outY);
+  bool packInto(int w, int h, vfe::ShelfPacker::Slot& out);
+
+  // Byte index of (page, x, y) in the page-major backing store.
+  size_t texelOffset(uint32_t page, uint32_t x, uint32_t y) const;
+
+  // Reserve the opaque block solidTexel() reports. Costs one 2x2 cell, taken
+  // before any glyph so its position is stable for the life of the sheet.
+  void reserveSolidTexel();
 
   std::unique_ptr<Face> styles_[kFontStyleCount];
   std::vector<std::unique_ptr<Face>> overrides_;                  // before styles_
   std::vector<std::unique_ptr<Face>> fallbacks_[kFontStyleCount]; // after
 
   std::unordered_map<uint64_t, Cell> cells_;
-  std::set<int> sizes_;              // every size ever requested
+  // The sizes ensureGlyphs() bakes its codepoint set at — the app's type
+  // roles, and only those. Sizes learned from the miss path are deliberately
+  // NOT added here; see the comment on bakeMisses().
+  std::set<int> sizes_;
 
   // Cell keys asked for and absent (mutable: recorded from the const draw
   // path — see hasMisses()), and the ones no face can ever supply, so a
@@ -228,9 +306,27 @@ class RasterFont : public TextFont {
   mutable std::set<uint64_t> misses_;
   std::set<uint64_t>         unservable_;
 
-  std::vector<uint8_t> atlas_;       // R8 coverage, atlasW_ * atlasH_
-  uint32_t atlasW_ = kAtlasW, atlasH_ = 0;
-  uint32_t shelfX_ = 0, shelfY_ = 0, shelfH_ = 0;
+  // R8 coverage, PAGE-MAJOR: page p occupies [p*kPageW*kPageH, (p+1)*...).
+  // One contiguous block so the whole atlas uploads from a single staging
+  // buffer, with one copy region per layer.
+  std::vector<uint8_t> atlas_;
+
+  // Where cells go. Holding the shelf bookkeeping in a type whose place() is
+  // all-or-nothing is what stops one oversized glyph from wedging the packer
+  // for the rest of the session — see shelf_packer.hh.
+  vfe::ShelfPacker packer_{kPageW, kPageH, kPad, /*maxPages=*/0};   // 0 = unlimited
+
+  // The reserved opaque block (see solidTexel()). 2x2 rather than 1x1 so its
+  // centre sits at a texel corner and a linear fetch there averages four
+  // fully-opaque texels instead of straddling the padding.
+  // Pages written since the consumer last took the record. Mutable because
+  // takeDirtyPages() is const on the TextFont seam — it reports and clears,
+  // and only the uploader ever calls it.
+  mutable std::set<uint32_t> dirtyPages_;
+
+  static constexpr uint32_t kSolidPx = 2;
+  uint32_t solidX_ = 0, solidY_ = 0;
+  bool     solidOk_ = false;
 
   float ascenderEm_ = 0.0f, descenderEm_ = 0.0f, lineHeightEm_ = 1.2f;
 };

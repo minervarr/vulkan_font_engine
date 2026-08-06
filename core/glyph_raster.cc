@@ -1,5 +1,7 @@
 #include "glyph_raster.hh"
 
+#include "log.hh"
+
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
@@ -87,6 +89,18 @@ bool RasterFace::hasCodepoint(uint32_t cp) const {
 bool RasterFace::render(uint32_t cp, int sizePx, RasterGlyph& out) const {
   out = RasterGlyph{};
   if (!face_ || sizePx <= 0) return false;
+
+  // Defence in depth against a caller with a corrupt size. FT_Set_Pixel_Sizes
+  // will happily take tens of millions and FT_Render_Glyph will then try to
+  // allocate a bitmap measured in gigabytes — which is exactly what a bug in
+  // the cache's key packing once made it do, once per missed styled glyph.
+  // The cache clamps too (RasterFont::quantize); this is the layer that does
+  // not depend on the cache being right.
+  if ((uint32_t)sizePx > kMaxRenderPx) {
+    VFE_LOGE("Raster", "render: refusing a %d px glyph (cap %u) for U+%04X",
+             sizePx, kMaxRenderPx, cp);
+    return false;
+  }
 
   FT_Face f = face(face_);
   const FT_UInt gid = FT_Get_Char_Index(f, (FT_ULong)cp);

@@ -66,7 +66,11 @@ void MsdfTextRenderer::createResources(VkRenderPass renderPass,
 
   VkImageViewCreateInfo iv{};
   iv.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-  iv.image = atlas_image_[w]; iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  // 2D_ARRAY even though this renderer only ever has one layer: msdf_frag.slang
+  // declares Sampler2DArray, and binding a plain 2D view to it is a descriptor
+  // dimensionality mismatch. Sampling layer 0 of a one-layer array is
+  // spec-identical to the 2D sample this used to do.
+  iv.image = atlas_image_[w]; iv.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
   iv.format = atlasFormat;
   iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
   vkCreateImageView(device_, &iv, nullptr, &atlas_view_[w]);
@@ -176,15 +180,16 @@ void MsdfTextRenderer::createResources(VkRenderPass renderPass,
                  VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr};
 
     VkVertexInputBindingDescription bind{0, MSDF_VERT_FLOATS * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attrs[3]{
+    VkVertexInputAttributeDescription attrs[4]{
       {0, 0, VK_FORMAT_R32G32_SFLOAT,       0},
       {1, 0, VK_FORMAT_R32G32_SFLOAT,       2 * sizeof(float)},
       {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 4 * sizeof(float)},
+      {3, 0, VK_FORMAT_R32_SFLOAT,          8 * sizeof(float)},   // atlas page
     };
     VkPipelineVertexInputStateCreateInfo vi{};
     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &bind;
-    vi.vertexAttributeDescriptionCount = 3; vi.pVertexAttributeDescriptions = attrs;
+    vi.vertexAttributeDescriptionCount = 4; vi.pVertexAttributeDescriptions = attrs;
 
     VkPipelineInputAssemblyStateCreateInfo ia2{};
     ia2.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;

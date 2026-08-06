@@ -879,6 +879,9 @@ float MsdfFont::emitGlyph(std::vector<float>& out, uint32_t cp, float penX,
   auto vert = [&](float x, float y, float u, float v) {
     out.push_back(x); out.push_back(y); out.push_back(u); out.push_back(v);
     out.push_back(r); out.push_back(g); out.push_back(b); out.push_back(a);
+    // Page. A distance-field atlas is one sheet and always will be — it is
+    // baked once for every size, so it does not grow with the display.
+    out.push_back(0.0f);
   };
   vert(q.x0, q.y0, q.u0, q.v0); vert(q.x1, q.y0, q.u1, q.v0); vert(q.x1, q.y1, q.u1, q.v1);
   vert(q.x0, q.y0, q.u0, q.v0); vert(q.x1, q.y1, q.u1, q.v1); vert(q.x0, q.y1, q.u0, q.v1);

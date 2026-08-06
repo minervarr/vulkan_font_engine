@@ -12,12 +12,19 @@ struct VSIn {
   float2 pos   : POSITION;    // location 0: screen px (y down)
   float2 uv    : TEXCOORD0;   // location 1
   float4 color : COLOR0;      // location 2
+  float  page  : TEXCOORD1;   // location 3: atlas array layer
 };
 
 struct VSOut {
   float4 position : SV_Position;
   float2 uv       : TEXCOORD0;
   float4 color    : COLOR0;
+  // Flat, and an integer. All six vertices of a quad carry the same page, but
+  // interpolating a constant is still a float sum of barycentric terms and can
+  // land a ULP off the value that went in — and SPIR-V *requires* an integer
+  // fragment input to be Flat, so declaring it this way is the rule enforcing
+  // itself rather than a comment asking to be believed.
+  nointerpolation uint layer : TEXCOORD1;
 };
 
 [shader("vertex")]
@@ -28,5 +35,6 @@ VSOut main(VSIn i) {
   o.position = float4(ndc, 0.0, 1.0);
   o.uv       = i.uv;
   o.color    = i.color;
+  o.layer    = (uint)(i.page + 0.5);   // the attribute is a float; the layer is not
   return o;
 }

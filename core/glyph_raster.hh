@@ -34,6 +34,13 @@ struct RasterGlyph {
 // leaking FreeType's headers to callers.
 class RasterFace {
  public:
+  // The largest size render() will accept. Not a design limit — a backstop.
+  // FreeType takes a pixel size as an unsigned int and does not sanity-check
+  // it, so a corrupt size reaches FT_Render_Glyph and becomes a multi-gigabyte
+  // allocation. Deliberately far above anything a UI asks for (~120 px at 8K)
+  // and far below anything that could hurt.
+  static constexpr uint32_t kMaxRenderPx = 4096;
+
   RasterFace() = default;
   ~RasterFace();
   RasterFace(const RasterFace&)            = delete;

@@ -5,6 +5,7 @@
 // curve/coverage compute path lives in curve_rasterizer.hh.
 
 #include "asset_reader.hh"
+#include "text_font.hh"
 #include <vulkan/vulkan.h>
 #include <cstdint>
 
@@ -13,7 +14,12 @@ class TextFont;
 class MsdfTextRenderer {
  public:
   static constexpr uint32_t MAX_MSDF_VERTS   = 96000; // total verts for all weights
-  static constexpr uint32_t MSDF_VERT_FLOATS = 8;     // pos.xy uv.xy rgba
+  // pos.xy uv.xy rgba page. Must equal TextFont::FLOATS_PER_VERT — both feed
+  // the SAME msdf_vert.slang, so a mismatch here is a silently wrong vertex
+  // stride in whichever renderer was not updated.
+  static constexpr uint32_t MSDF_VERT_FLOATS = 9;
+  static_assert(MSDF_VERT_FLOATS == (uint32_t)TextFont::FLOATS_PER_VERT,
+                "vertex layout diverged from TextFont");
   static constexpr int      MAX_FONT_WEIGHTS = 4;     // Regular/Bold/Italic/BoldItalic
 
   // Stores device/asset/extent state only; GPU resources are created by

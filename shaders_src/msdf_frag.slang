@@ -16,7 +16,10 @@ struct Push {
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
-[[vk::binding(0, 0)]] Sampler2D msdf;
+// An ARRAY sampler, always — a single-page atlas is bound as a one-layer array
+// view and sampled at layer 0, which the spec defines identically to a plain 2D
+// sample. One shader, one pipeline, whatever the atlas is.
+[[vk::binding(0, 0)]] Sampler2DArray msdf;
 
 float median(float r, float g, float b) {
   return max(min(r, g), min(max(r, g), b));
@@ -25,11 +28,12 @@ float median(float r, float g, float b) {
 struct PSIn {
   float2 uv    : TEXCOORD0;
   float4 color : COLOR0;
+  nointerpolation uint layer : TEXCOORD1;
 };
 
 [shader("fragment")]
 float4 main(PSIn i) : SV_Target {
-  float4 msd = msdf.Sample(i.uv);
+  float4 msd = msdf.Sample(float3(i.uv, (float)i.layer));
 
   // ── Raster path: the coverage is already the answer ──────────────────────
   //
