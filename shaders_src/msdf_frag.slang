@@ -6,7 +6,11 @@
 struct Push {
   float2 screen;
   float  pxRange;
-  float  mtsdf;      // 1 = alpha is a true SDF (runtime MTSDF atlas), else 0
+  // Which kind of atlas is bound:
+  //   0 = MSDF   (RGB field, constant alpha — a pre-baked v2 pair)
+  //   1 = MTSDF  (RGB field + true single-channel SDF in alpha)
+  //   2 = RASTER (R = 8-bit coverage, baked at the size it is drawn at)
+  float  mtsdf;
   float2 atlasSize;
   float2 scroll;     // (unused in fragment; keeps push layout identical)
 };
@@ -26,6 +30,31 @@ struct PSIn {
 [shader("fragment")]
 float4 main(PSIn i) : SV_Target {
   float4 msd = msdf.Sample(i.uv);
+
+  // ── Raster path: the coverage is already the answer ──────────────────────
+  //
+  // A per-size raster cell holds true area coverage of the outline at the
+  // exact size it is being drawn at, so there is no field to reconstruct and
+  // no edge to sharpen — every line between here and `cov` below exists only
+  // to turn a distance into a coverage that this atlas already stores. Doing
+  // any of it anyway would filter an antialiased edge a second time.
+  //
+  // Note this also retires kTrueSdfAlphaTag: that hack stole vertex-alpha
+  // precision to flag dense CJK glyphs whose median developed channel-conflict
+  // blobs. Coverage has no channels to conflict, so vertex alpha is plain
+  // alpha again.
+  if (push.mtsdf > 1.5) {
+    float rcov = i.color.a * msd.r;
+    float3 rlin = select(i.color.rgb <= 0.04045,
+                         i.color.rgb / 12.92,
+                         pow((i.color.rgb + 0.055) / 1.055, 2.4));
+    float3 rblended = rlin * rcov;
+    float3 rout = select(rblended <= 0.0031308,
+                         rblended * 12.92,
+                         1.055 * pow(rblended, 1.0 / 2.4) - 0.055);
+    return float4(rout, rcov);
+  }
+
   float  sd  = median(msd.r, msd.g, msd.b);
 
   // Canonical Chlumsky screen-px-range: convert the distance field's texel range to

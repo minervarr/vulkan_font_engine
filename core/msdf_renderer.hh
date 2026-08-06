@@ -8,7 +8,7 @@
 #include <vulkan/vulkan.h>
 #include <cstdint>
 
-class MsdfFont;
+class TextFont;
 
 class MsdfTextRenderer {
  public:
@@ -24,7 +24,7 @@ class MsdfTextRenderer {
 
   // Creates atlas + descriptor for one weight. Shared pipeline/vertex-buffer/
   // layout are created on the first call (weightIdx==0 or whichever is first).
-  void createResources(VkRenderPass renderPass, const MsdfFont& font, int weightIdx = 0);
+  void createResources(VkRenderPass renderPass, const TextFont& font, int weightIdx = 0);
   // Records atlas upload (staging → device image) for a specific weight.
   void recordAtlasUpload(VkCommandBuffer cmd, int weightIdx = 0);
   bool ready(int weightIdx = 0) const {

@@ -1,6 +1,7 @@
 #pragma once
 #include "asset_reader.hh"
 #include "gpos_kern.hh"
+#include "text_font.hh"   // GlyphQuad, FontStyle, TextMode, the TextFont seam
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -70,11 +71,10 @@ struct MathConstants {
   float minConnectorOverlap()            const { return v[41]; }
 };
 
-// Named font styles baked into the one atlas; the id is also the high byte of a
-// glyph key = (style<<24)|gid. Roman is the default text face; Math carries the
-// variables (math-italic), Greek, operators, delimiters and radicals.
-enum class FontStyle : uint8_t { Roman = 0, Bold = 1, Math = 2, Italic = 3 };
-inline constexpr int kFontStyleCount = 4;
+// FontStyle / kFontStyleCount live in text_font.hh, shared with RasterFont.
+// Here the style id doubles as the high byte of a glyph key = (style<<24)|gid.
+// Roman is the default text face; Math carries the variables (math-italic),
+// Greek, operators, delimiters and radicals.
 
 struct MathVariant { uint32_t key = 0; float advance = 0.0f; };          // em
 struct MathPart    { uint32_t key = 0; float start = 0, end = 0, full = 0; bool ext = false; }; // em
@@ -98,19 +98,10 @@ struct VStretch {
   std::vector<PlacedPart> parts;
 };
 
-// A laid-out glyph quad in screen px + normalised atlas UVs. draw=false for
-// blanks (space) or missing glyphs.
-struct GlyphQuad {
-  float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-  float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
-  bool  draw = false;
-};
+// GlyphQuad now lives in text_font.hh, shared with RasterFont.
 
-class MsdfFont {
+class MsdfFont : public TextFont {
  public:
-  static constexpr int FLOATS_PER_VERT = 8;
-  static constexpr int VERTS_PER_GLYPH = 6;
-
   bool load(AssetReader& reader, const char* metricsPath, const char* atlasPath);
   bool generate(AssetReader& reader, const char* fontPath, const char* cachePath = nullptr);
   // Bakes an additional face into the SAME shared atlas (appended as new rows,
@@ -150,7 +141,7 @@ class MsdfFont {
   // Valid = metrics usable for measuring/layout. Deliberately NOT tied to the
   // CPU atlas pixels being resident: releaseAtlasPixels() frees those after
   // the GPU upload, and layout/measure only needs the glyph tables.
-  bool valid() const { return !glyphs_.empty() && atlasW_ > 0 && atlasH_ > 0; }
+  bool valid() const override { return !glyphs_.empty() && atlasW_ > 0 && atlasH_ > 0; }
 
   // The atlas pixel buffer is only needed twice: to upload the texture to the
   // GPU, and as the append target when baking more glyphs. Between those
@@ -163,15 +154,18 @@ class MsdfFont {
   // (metrics stay as-is — they never left). No-op if already resident.
   bool ensureAtlasLoaded(const char* cachePath);
 
-  uint32_t atlasW() const { return atlasW_; }
-  uint32_t atlasH() const { return atlasH_; }
+  uint32_t atlasW() const override { return atlasW_; }
+  uint32_t atlasH() const override { return atlasH_; }
   // True when the atlas's alpha channel carries a real single-channel SDF
   // (runtime generate()/v8 cache — see generateMTSDF in msdf.cc). False for
   // pre-baked load() atlases whose alpha is a constant 255; renderers gate
   // their small-size median→trueSDF blend on this so those stay pixel-exact.
-  bool isMtsdf() const { return isMtsdf_; }
-  const std::vector<uint8_t>& atlas() const { return atlas_; }
-  float distanceRange() const { return distanceRange_; }
+  bool isMtsdf() const override { return isMtsdf_; }
+  const std::vector<uint8_t>& atlas() const override { return atlas_; }
+  // RGBA: the three MSDF channels plus the true-SDF alpha.
+  uint32_t atlasChannels() const override { return 4; }
+  TextMode textMode() const override { return TextMode::Mtsdf; }
+  float distanceRange() const override { return distanceRange_; }
   // The MSDF distance-field margin baked into every glyph's plane box, in EM. The
   // true ink edges are plane{L,T} + pad and plane{R,B} − pad. Needed for pixel-
   // exact joins (e.g. attaching the radical vinculum to the surd's true peak).
@@ -181,15 +175,15 @@ class MsdfFont {
   // default-face table — i.e. bakeCodepoints() doesn't need to be asked for
   // it again. Used to find which codepoints in a freshly-rescanned library
   // are genuinely new before spending a bake+GPU-reupload cycle on them.
-  bool hasCodepoint(uint32_t cp) const {
+  bool hasCodepoint(uint32_t cp) const override {
     const MsdfGlyph* g = lookup(cp);
     return g && g->hasGlyph;
   }
 
-  float advance(uint32_t cp, float sizePx) const;
-  float textWidth(std::string_view s, float sizePx) const;
-  float lineHeight(float sizePx) const { return lineHeight_ * sizePx; }
-  float ascender(float sizePx) const { return -ascender_ * sizePx; }
+  float advance(uint32_t cp, float sizePx) const override;
+  float textWidth(std::string_view s, float sizePx) const override;
+  float lineHeight(float sizePx) const override { return lineHeight_ * sizePx; }
+  float ascender(float sizePx) const override { return -ascender_ * sizePx; }
 
   // ── Kerning ──────────────────────────────────────────────────────────────
   // Horizontal adjustment (EM, negative = tighten) to apply BEFORE drawing
@@ -206,7 +200,7 @@ class MsdfFont {
   // Same, for a face registered by addStyle(). Falls back to the Roman table
   // when that style baked no kern data, matching how glyph lookup itself falls
   // back to the default face.
-  float kernEmStyled(FontStyle s, uint32_t prevCp, uint32_t cp) const {
+  float kernEmStyled(FontStyle s, uint32_t prevCp, uint32_t cp) const override {
     const auto& t = kern_[static_cast<int>(s)];
     if (t.empty()) return kernEm(prevCp, cp);
     return kernLookup(t, prevCp, cp);
@@ -226,7 +220,7 @@ class MsdfFont {
   // Lay out one glyph (no emission) so the caller can clip the quad. Returns
   // the advanced pen X; fills q with geometry (q.draw == false to skip).
   float layout(uint32_t cp, float penX, float baselineY, float sizePx,
-               GlyphQuad& q, uint32_t prevCp = 0) const;
+               GlyphQuad& q, uint32_t prevCp = 0) const override;
 
   // ── OpenType MATH (font.msdf v2) ─────────────────────────────────────────
   bool hasMath() const { return hasMath_; }
@@ -240,7 +234,7 @@ class MsdfFont {
   }
   // Resolve a codepoint to a glyph key in a given style (Roman/Bold/Italic/Math).
   // Returns 0 if that style doesn't cover the codepoint.
-  uint32_t keyForStyle(FontStyle s, uint32_t cp) const {
+  uint32_t keyForStyle(FontStyle s, uint32_t cp) const override {
     const auto& m = styleCmap_[static_cast<int>(s)];
     auto it = m.find(cp);
     return it == m.end() ? 0 : it->second;
@@ -258,9 +252,9 @@ class MsdfFont {
   // quad + UVs so the caller (Canvas) can clip/rotate it like text. Returns the
   // advanced penX. Used for math-italic atoms and stretched-assembly parts.
   float layoutByKey(uint32_t key, float penX, float baselineY, float sizePx,
-                    GlyphQuad& q) const;
+                    GlyphQuad& q) const override;
   // Advance width (em·sizePx) of a key glyph.
-  float advanceKey(uint32_t key, float sizePx) const {
+  float advanceKey(uint32_t key, float sizePx) const override {
     const MsdfGlyph* g = glyphByKey(key);
     return g ? g->advance * sizePx : 0.0f;
   }

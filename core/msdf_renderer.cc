@@ -18,7 +18,7 @@ void MsdfTextRenderer::init(VkDevice device, VkPhysicalDevice physicalDevice,
 }
 
 void MsdfTextRenderer::createResources(VkRenderPass renderPass,
-                                       const MsdfFont& font, int w) {
+                                       const TextFont& font, int w) {
   if (!font.valid()) { LOGE("MSDF font invalid (weight %d); skipping", w); return; }
   // valid() no longer implies the CPU atlas pixels are resident (they can be
   // released after upload) — this path memcpys them, so check explicitly.
@@ -28,13 +28,25 @@ void MsdfTextRenderer::createResources(VkRenderPass renderPass,
   atlas_w_ [w] = font.atlasW();
   atlas_h_ [w] = font.atlasH();
   px_range_[w] = font.distanceRange();
-  mtsdf_   [w] = font.isMtsdf() ? 1.0f : 0.0f;
+  // The fragment shader's mode word. MTSDF passes 1 to enable the small-size
+  // median->trueSDF blend; the raster path passes 2, which skips distance-field
+  // reconstruction entirely and reads coverage straight out of R. See
+  // shaders_src/msdf_frag.slang.
+  mtsdf_   [w] = font.textMode() == TextMode::Raster ? 2.0f
+                                                     : (font.isMtsdf() ? 1.0f : 0.0f);
+
+  // 4 for MTSDF (RGB field + true-SDF alpha), 1 for raster coverage. A raster
+  // atlas is a quarter the bytes of an MTSDF one of the same dimensions, which
+  // is a real part of why the per-size cache fits at all.
+  const uint32_t chans = font.atlasChannels();
+  const VkFormat atlasFormat =
+      chans == 1 ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
 
   // ── Per-weight: atlas image (device-local, sampled) ───────────────────────
   VkImageCreateInfo img{};
   img.sType     = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
   img.imageType = VK_IMAGE_TYPE_2D;
-  img.format    = VK_FORMAT_R8G8B8A8_UNORM;
+  img.format    = atlasFormat;
   img.extent    = {atlas_w_[w], atlas_h_[w], 1};
   img.mipLevels = 1; img.arrayLayers = 1; img.samples = VK_SAMPLE_COUNT_1_BIT;
   img.tiling    = VK_IMAGE_TILING_OPTIMAL;
@@ -55,7 +67,7 @@ void MsdfTextRenderer::createResources(VkRenderPass renderPass,
   VkImageViewCreateInfo iv{};
   iv.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
   iv.image = atlas_image_[w]; iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
-  iv.format = VK_FORMAT_R8G8B8A8_UNORM;
+  iv.format = atlasFormat;
   iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
   vkCreateImageView(device_, &iv, nullptr, &atlas_view_[w]);
 
@@ -67,7 +79,7 @@ void MsdfTextRenderer::createResources(VkRenderPass renderPass,
   vkCreateSampler(device_, &sm, nullptr, &sampler_[w]);
 
   // ── Per-weight: staging buffer (for one-shot atlas upload) ────────────────
-  VkDeviceSize atlasBytes = (VkDeviceSize)atlas_w_[w] * atlas_h_[w] * 4;
+  VkDeviceSize atlasBytes = (VkDeviceSize)atlas_w_[w] * atlas_h_[w] * chans;
   VkBufferCreateInfo sb{};
   sb.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   sb.size  = atlasBytes; sb.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;

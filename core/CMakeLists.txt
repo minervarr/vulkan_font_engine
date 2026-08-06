@@ -33,6 +33,8 @@ add_library(vk_font_core STATIC
     glyphs.cc
     msdf.cc
     gpos_kern.cc
+    glyph_raster.cc
+    raster_font.cc
     gpu_util.cc
     curve_rasterizer.cc
     msdf_renderer.cc
@@ -75,5 +77,19 @@ if(NOT ANDROID AND CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(gpos_kern_test PRIVATE /W3 /utf-8)
     else()
         target_compile_options(gpos_kern_test PRIVATE -Wall)
+    endif()
+
+    # glyph_raster_test links glyph_raster.cc + FreeType and NOTHING else — no
+    # msdfgen, no Vulkan, no RasterFont. Rasterizing an outline is the one part
+    # of the raster text path that can be checked against arithmetic rather
+    # than against a screenshot, and keeping it linkable alone is what makes
+    # that possible. Same rule as gpos_kern_test above.
+    add_executable(glyph_raster_test tests/glyph_raster_test.cc glyph_raster.cc)
+    target_include_directories(glyph_raster_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(glyph_raster_test PRIVATE freetype)
+    if(MSVC)
+        target_compile_options(glyph_raster_test PRIVATE /W3 /utf-8)
+    else()
+        target_compile_options(glyph_raster_test PRIVATE -Wall)
     endif()
 endif()
