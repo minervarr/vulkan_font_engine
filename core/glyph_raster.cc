@@ -4,6 +4,9 @@
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include FT_OUTLINE_H
+
+#include <cmath>
 
 #include <cstring>
 #include <utility>
@@ -146,6 +149,187 @@ bool RasterFace::render(uint32_t cp, int sizePx, RasterGlyph& out) const {
     const uint8_t* src = bm.buffer + (ptrdiff_t)y * bm.pitch;
     std::memcpy(out.cov.data() + (size_t)y * (size_t)out.w, src, (size_t)out.w);
   }
+  return true;
+}
+
+// ── Outline extraction ──────────────────────────────────────────────────────
+//
+// Everything render() does except FT_Render_Glyph. The cell it reports must be
+// the SAME cell FreeType would have produced, so the geometry is taken from
+// FT_Outline_Get_CBox grid-fitted exactly the way FreeType's own rasterizer
+// does it: floor the minimum, ceil the maximum, in 26.6.
+
+namespace {
+
+// Flatten in cell-local pixels, y down. FreeType hands us 26.6 y-up
+// coordinates with the origin at the pen.
+struct OutlineCtx {
+  std::vector<vfe::AreaEdge>* edges;
+  float originX = 0.0f;   // 26.6 x of the cell's left edge
+  float originY = 0.0f;   // 26.6 y of the cell's TOP edge
+  float curX = 0.0f, curY = 0.0f;
+  float startX = 0.0f, startY = 0.0f;
+  bool  open = false;
+
+  float toX(FT_Pos v) const { return ((float)v - originX) * (1.0f / 64.0f); }
+  // y-up (font) -> y-down (cell)
+  float toY(FT_Pos v) const { return (originY - (float)v) * (1.0f / 64.0f); }
+
+  void lineTo(float x, float y) {
+    edges->push_back(vfe::AreaEdge{curX, curY, x, y});
+    curX = x; curY = y;
+  }
+
+  // FT_Outline_Decompose starts each contour with move_to and never emits the
+  // closing edge back to its first point. An unclosed contour has no defined
+  // interior — the row's running winding sum never returns to zero and the
+  // fill bleeds to the right edge of the cell — so close them here.
+  void closeContour() {
+    if (!open) return;
+    if (curX != startX || curY != startY) lineTo(startX, startY);
+    open = false;
+  }
+};
+
+// ── Flattening ──────────────────────────────────────────────────────────────
+//
+// Uniform subdivision, with the segment count derived from the curve's own
+// SECOND DIFFERENCE rather than from its length. The maximum distance a
+// Bézier strays from its chord is a fixed multiple of that second difference,
+// and splitting into n uniform pieces divides the deviation by n squared — so
+// the count below is the smallest n that holds the error under kFlatTol.
+//
+// A length-proportional heuristic (segments per pixel) was tried first and is
+// strictly worse in both directions: it over-subdivides a long gentle curve
+// into thousands of edges the GPU then has to process, and under-subdivides a
+// short sharp one, which is where the error actually lives.
+//
+// kFlatTol is deliberately BELOW the 1/64 pixel the outline itself is
+// quantized to, so flattening is not the limiting factor in the result —
+// area_raster_test measures what is, and it is the rasterizer's own
+// fixed-point rounding at +/-2/255.
+//
+// Note this makes the curves FINER than FreeType's, whose own splitting stops
+// at a quarter pixel. That is a deliberate choice (see area_raster_test): the
+// output is closer to the designer's outline than FreeType's is, at the cost
+// of not being bit-identical to it.
+constexpr float kFlatTol = 1.0f / 128.0f;
+
+int stepsForDeviation(float d) {
+  if (d <= 0.0f) return 1;
+  int n = (int)std::ceil(std::sqrt(d / kFlatTol));
+  if (n < 1) n = 1;
+  if (n > 256) n = 256;
+  return n;
+}
+
+float vlen(float x, float y) { return std::sqrt(x * x + y * y); }
+
+int cbMove(const FT_Vector* to, void* user) {
+  auto* c = (OutlineCtx*)user;
+  c->closeContour();
+  c->curX = c->startX = c->toX(to->x);
+  c->curY = c->startY = c->toY(to->y);
+  c->open = true;
+  return 0;
+}
+
+int cbLine(const FT_Vector* to, void* user) {
+  auto* c = (OutlineCtx*)user;
+  c->lineTo(c->toX(to->x), c->toY(to->y));
+  return 0;
+}
+
+int cbConic(const FT_Vector* ctrl, const FT_Vector* to, void* user) {
+  auto* c = (OutlineCtx*)user;
+  const float x0 = c->curX, y0 = c->curY;
+  const float cx = c->toX(ctrl->x), cy = c->toY(ctrl->y);
+  const float x1 = c->toX(to->x),   y1 = c->toY(to->y);
+  // |P0 - 2*P1 + P2| / 8 is the quadratic's maximum deviation from its chord.
+  const int n = stepsForDeviation(vlen(x0 - 2 * cx + x1, y0 - 2 * cy + y1) * 0.125f);
+  for (int i = 1; i <= n; ++i) {
+    const float t = (float)i / (float)n, u = 1.0f - t;
+    c->lineTo(u * u * x0 + 2 * u * t * cx + t * t * x1,
+              u * u * y0 + 2 * u * t * cy + t * t * y1);
+  }
+  return 0;
+}
+
+int cbCubic(const FT_Vector* c1, const FT_Vector* c2, const FT_Vector* to,
+            void* user) {
+  auto* c = (OutlineCtx*)user;
+  const float x0 = c->curX, y0 = c->curY;
+  const float ax = c->toX(c1->x), ay = c->toY(c1->y);
+  const float bx = c->toX(c2->x), by = c->toY(c2->y);
+  const float x1 = c->toX(to->x), y1 = c->toY(to->y);
+  // (3/4) * max of the two second differences bounds the cubic's deviation.
+  const float d1 = vlen(x0 - 2 * ax + bx, y0 - 2 * ay + by);
+  const float d2 = vlen(ax - 2 * bx + x1, ay - 2 * by + y1);
+  const int n = stepsForDeviation(0.75f * (d1 > d2 ? d1 : d2));
+  for (int i = 1; i <= n; ++i) {
+    const float t = (float)i / (float)n, u = 1.0f - t;
+    c->lineTo(u*u*u*x0 + 3*u*u*t*ax + 3*u*t*t*bx + t*t*t*x1,
+              u*u*u*y0 + 3*u*u*t*ay + 3*u*t*t*by + t*t*t*y1);
+  }
+  return 0;
+}
+
+}  // namespace
+
+bool RasterFace::outline(uint32_t cp, int sizePx, OutlineGlyph& out) const {
+  out = OutlineGlyph{};
+  if (!face_ || sizePx <= 0) return false;
+  if ((uint32_t)sizePx > kMaxRenderPx) return false;
+
+  FT_Face f = face(face_);
+  const FT_UInt gid = FT_Get_Char_Index(f, (FT_ULong)cp);
+  if (gid == 0) return false;
+  if (FT_Set_Pixel_Sizes(f, 0, (FT_UInt)sizePx) != 0) return false;
+  if (FT_Load_Glyph(f, gid, FT_LOAD_NO_HINTING | FT_LOAD_TARGET_NORMAL) != 0)
+    return false;
+
+  out.advance = (float)f->glyph->advance.x * k26_6;
+  if (f->glyph->format != FT_GLYPH_FORMAT_OUTLINE) return false;
+
+  FT_Outline& ol = f->glyph->outline;
+
+  // The cell, grid-fitted the way FreeType's rasterizer does: the bitmap
+  // covers whole pixels from floor(min) to ceil(max). Matching this is what
+  // makes bearingX/bearingY and w/h agree with render().
+  FT_BBox cbox;
+  FT_Outline_Get_CBox(&ol, &cbox);
+  const FT_Pos xMin = (cbox.xMin) & ~63;
+  const FT_Pos yMin = (cbox.yMin) & ~63;
+  const FT_Pos xMax = (cbox.xMax + 63) & ~63;
+  const FT_Pos yMax = (cbox.yMax + 63) & ~63;
+
+  out.bearingX = (int)(xMin >> 6);
+  out.bearingY = (int)(yMax >> 6);
+  out.w = (int)((xMax - xMin) >> 6);
+  out.h = (int)((yMax - yMin) >> 6);
+
+  // Whitespace: a real advance and no ink, reported as success — same contract
+  // as render().
+  if (out.w <= 0 || out.h <= 0) {
+    out.w = out.h = 0;
+    return true;
+  }
+
+  OutlineCtx ctx;
+  ctx.edges   = &out.edges;
+  ctx.originX = (float)xMin;
+  ctx.originY = (float)yMax;
+
+  FT_Outline_Funcs funcs;
+  funcs.move_to  = cbMove;
+  funcs.line_to  = cbLine;
+  funcs.conic_to = cbConic;
+  funcs.cubic_to = cbCubic;
+  funcs.shift    = 0;
+  funcs.delta    = 0;
+
+  if (FT_Outline_Decompose(&ol, &funcs, &ctx) != 0) return false;
+  ctx.closeContour();   // the last contour gets no trailing move_to
   return true;
 }
 

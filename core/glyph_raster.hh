@@ -1,4 +1,6 @@
 #pragma once
+#include "area_raster.hh"
+
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -29,6 +31,15 @@ struct RasterGlyph {
   int   bearingX = 0, bearingY = 0;
   float advance  = 0.0f;   // in pixels, at this size
   std::vector<uint8_t> cov;
+};
+
+// The same glyph as flattened edges rather than coverage. Geometry fields
+// mirror RasterGlyph exactly so the two can be compared cell for cell.
+struct OutlineGlyph {
+  int   w = 0, h = 0;
+  int   bearingX = 0, bearingY = 0;
+  float advance  = 0.0f;
+  std::vector<AreaEdge> edges;   // cell-local pixels, y down
 };
 
 // A face opened once and rasterized from many times. Wraps FT_Face without
@@ -71,6 +82,18 @@ class RasterFace {
   // glyph for it. A whitespace glyph returns TRUE with an empty bitmap — the
   // caller still needs its advance.
   bool render(uint32_t cp, int sizePx, RasterGlyph& out) const;
+
+  // The same glyph, at the same size, as flattened OUTLINE EDGES instead of
+  // coverage — everything render() produces except the scan conversion.
+  //
+  // `out.edges` are in CELL-LOCAL pixel coordinates (x right, y DOWN, origin at
+  // the cell's top-left texel), and out.w/h/bearingX/bearingY/advance are
+  // exactly what render() would have reported. That correspondence is the
+  // whole point: it lets a different rasterizer be measured against FreeType's
+  // pixel for pixel, and it is the only reason a comparison means anything.
+  //
+  // Cheap — this is the part of glyph loading that ISN'T the expensive part.
+  bool outline(uint32_t cp, int sizePx, OutlineGlyph& out) const;
 
   // Vertical metrics as EM fractions, straight from the face's design units.
   //

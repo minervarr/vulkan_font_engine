@@ -93,6 +93,20 @@ if(NOT ANDROID AND CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(glyph_raster_test PRIVATE -Wall)
     endif()
 
+    # area_raster_test is the quality gate for the GPU rasterizer: it measures
+    # area_raster.hh's coverage against FreeType's, glyph by glyph. Same
+    # linkage rule as glyph_raster_test — glyph_raster.cc + FreeType, nothing
+    # else — because the whole point is to compare two rasterizers with no
+    # engine, no Vulkan and no atlas in between.
+    add_executable(area_raster_test tests/area_raster_test.cc glyph_raster.cc)
+    target_include_directories(area_raster_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(area_raster_test PRIVATE freetype)
+    if(MSVC)
+        target_compile_options(area_raster_test PRIVATE /W3 /utf-8)
+    else()
+        target_compile_options(area_raster_test PRIVATE -Wall)
+    endif()
+
     # cell_key_test and shelf_packer_test link NOTHING AT ALL — both headers
     # are self-contained by design, and that is what lets the two pieces the
     # raster cache is built on be checked as arithmetic instead of as a
