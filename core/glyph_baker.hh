@@ -60,6 +60,11 @@ class GlyphBaker {
 
   // Scratch budgets, per batch. Sized so a batch is a few tens of MB and a
   // large glyph still fits on its own.
+  //
+  // Do NOT raise these to make the bake one batch. That was tried, on the
+  // theory that each batch boundary costs a device stall: at 4M edges the 8K
+  // bake got SLOWER, 1450 -> 1950 ms. Batch count is not where the time goes,
+  // and the extra host-visible memory costs more than the stalls it removes.
   static constexpr uint32_t kMaxEdges = 1u << 20;   // 16 MB of float4
   static constexpr uint32_t kMaxCells = 8192;
   static constexpr uint32_t kAccInts  = 24u << 20;  // 96 MB
