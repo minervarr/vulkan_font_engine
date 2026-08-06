@@ -196,7 +196,10 @@ class RasterFont : public TextFont {
   // A fully opaque texel, for a caller that wants a solid quad out of the
   // text pipeline (Canvas::quadMsdfRect). False if none has been reserved.
   bool solidTexel(float& u, float& v) const override;
-  const std::vector<uint8_t>& atlas() const override { return atlas_; }
+  const std::vector<uint8_t>& atlas() const override {
+    static const std::vector<uint8_t> kNone;
+    return gpuBake_ ? kNone : atlas_;
+  }
   // The PAGE size, not the whole sheet's: every page is exactly this, which is
   // what lets them be the layers of one array image and what lets layoutByKey()
   // normalise against a constant instead of a moving high-water mark.
@@ -204,6 +207,38 @@ class RasterFont : public TextFont {
   uint32_t atlasH() const override { return kPageH; }
   uint32_t atlasPages() const override { return packer_.pageCount(); }
   void takeDirtyPages(std::vector<uint32_t>& out) const override;
+
+  // ── GPU baking ───────────────────────────────────────────────────────────
+  //
+  // In GPU mode ensureGlyphs still PLANS and PACKS exactly as before — same
+  // ShelfPacker, same cell keys, same deterministic layout — but instead of
+  // scan-converting each glyph it keeps the flattened outline and where the
+  // cell goes. The host hands those to GlyphBaker, which rasterizes them in
+  // compute and writes them straight into the atlas image.
+  //
+  // The CPU-side atlas_ vector is then never written, which is why
+  // atlasOnGpu() reports true and atlas() comes back empty: there is nothing
+  // to upload, because the pixels are produced where they are consumed.
+  struct GpuCell {
+    vfe::OutlineGlyph glyph;
+    uint32_t page = 0, x = 0, y = 0;
+  };
+  void useGpuBake(bool on) { gpuBake_ = on; }
+  bool atlasOnGpu() const override { return gpuBake_; }
+  bool hasGpuWork() const { return gpuBaked_ < gpuCells_.size() || solidPending_; }
+  // Every cell ever placed in GPU mode, kept rather than handed away.
+  //
+  // Growing the atlas creates a NEW image, and a new image is empty — every
+  // cell baked into the old one is gone. Keeping the outlines means that case
+  // is just "bake all of them again" instead of a silent hole in the text.
+  // gpuBakedCount() is how far the host has got; it resets that to 0 when the
+  // image handle changes underneath it.
+  const std::vector<GpuCell>& gpuCells() const { return gpuCells_; }
+  size_t gpuBakedCount() const { return gpuBaked_; }
+  void setGpuBakedCount(size_t n) { gpuBaked_ = n; }
+  // The reserved opaque block, which has no outline to rasterize. True once,
+  // after it has been placed.
+  bool takeSolidCell(uint32_t& page, uint32_t& x, uint32_t& y, uint32_t& n);
   uint32_t atlasChannels() const override { return 1; }   // 8-bit coverage
   TextMode textMode() const override { return TextMode::Raster; }
   float distanceRange() const override { return 0.0f; }   // no field to range
@@ -251,6 +286,7 @@ class RasterFont : public TextFont {
     int         sizePx = 0;
     uint32_t    cp = 0;
     vfe::RasterGlyph glyph;
+    vfe::OutlineGlyph outline;   // GPU mode fills this instead
     bool        ok = false;
   };
 
@@ -271,6 +307,7 @@ class RasterFont : public TextFont {
   // is a single allocator, and commit ORDER is what keeps the atlas layout
   // deterministic for a given input.
   bool commitJob(BakeJob& job);
+  bool commitGpuJob(BakeJob& job);
 
   // Both key codecs live in cell_key.hh, where the field positions are derived
   // from declared widths and the round-trips are proved with static_assert.
@@ -359,6 +396,12 @@ class RasterFont : public TextFont {
   // takeDirtyPages() is const on the TextFont seam — it reports and clears,
   // and only the uploader ever calls it.
   mutable std::set<uint32_t> dirtyPages_;
+
+  bool gpuBake_ = false;
+  bool solidPending_ = false;
+  uint32_t solidPage_ = 0;
+  std::vector<GpuCell> gpuCells_;
+  size_t gpuBaked_ = 0;
 
   static constexpr uint32_t kSolidPx = 2;
   uint32_t solidX_ = 0, solidY_ = 0;

@@ -122,6 +122,11 @@ class TextFont {
   // MsdfFont has never needed a second page and does not implement this.
   virtual uint32_t atlasPages() const { return 1; }
 
+  // True when the atlas pixels live only on the GPU and atlas() is empty.
+  // The consumer then allocates the image and uploads nothing — something
+  // else writes it. See GlyphBaker.
+  virtual bool atlasOnGpu() const { return false; }
+
   // Pages whose bytes have changed since this was last called, and clears the
   // record. The consumer re-uploads exactly these instead of the whole atlas.
   //

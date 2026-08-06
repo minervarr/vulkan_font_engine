@@ -214,6 +214,13 @@ void RasterFont::reserveSolidTexel() {
   if (solidOk_) return;
   vfe::ShelfPacker::Slot slot;
   if (!packInto((int)kSolidPx, (int)kSolidPx, slot)) return;
+  if (gpuBake_) {
+    // Nothing to write here — the host blits it through the baker, since the
+    // pixels live on the GPU.
+    solidX_ = slot.x; solidY_ = slot.y; solidPage_ = slot.page;
+    solidOk_ = true; solidPending_ = true;
+    return;
+  }
   for (uint32_t r = 0; r < kSolidPx; ++r)
     std::memset(atlas_.data() + texelOffset(slot.page, slot.x, slot.y + r),
                 0xFF, kSolidPx);
@@ -231,6 +238,14 @@ bool RasterFont::solidTexel(float& u, float& v) const {
   return true;
 }
 
+bool RasterFont::takeSolidCell(uint32_t& page, uint32_t& x, uint32_t& y,
+                               uint32_t& n) {
+  if (!solidPending_) return false;
+  page = solidPage_; x = solidX_; y = solidY_; n = kSolidPx;
+  solidPending_ = false;
+  return true;
+}
+
 void RasterFont::takeDirtyPages(std::vector<uint32_t>& out) const {
   out.assign(dirtyPages_.begin(), dirtyPages_.end());
   dirtyPages_.clear();
@@ -244,6 +259,9 @@ void RasterFont::reset() {
   atlas_.clear();
   packer_.reset();
   dirtyPages_.clear();
+  gpuCells_.clear();
+  gpuBaked_ = 0;
+  solidPending_ = false;
   solidOk_ = false;
   solidX_ = solidY_ = 0;
 }
@@ -284,7 +302,8 @@ void RasterFont::rasterizeJobs(BakeJob* jobs, size_t count) {
       if (!j.face) continue;
       const vfe::RasterFace* r = &j.face->bakeFaces[w];
       if (!r->isOpen()) r = &j.face->raster;
-      j.ok = r->render(j.cp, j.sizePx, j.glyph);
+      j.ok = gpuBake_ ? r->outline(j.cp, j.sizePx, j.outline)
+                      : r->render(j.cp, j.sizePx, j.glyph);
     }
   };
 
@@ -297,6 +316,33 @@ void RasterFont::rasterizeJobs(BakeJob* jobs, size_t count) {
   for (uint32_t w = 1; w < workers; ++w) pool.emplace_back(run, w);
   run(0);
   for (auto& t : pool) t.join();
+}
+
+// In GPU mode the cell is placed and recorded, and its pixels are produced
+// later by the compute passes. Everything about the PLACEMENT is identical to
+// the CPU path — same packer, same order — so the atlas layout does not depend
+// on which rasterizer made it.
+bool RasterFont::commitGpuJob(BakeJob& job) {
+  if (!job.ok) return false;
+
+  Cell c;
+  c.advance  = job.outline.advance;
+  c.bearingX = job.outline.bearingX;
+  c.bearingY = job.outline.bearingY;
+
+  if (job.outline.w > 0 && job.outline.h > 0) {
+    vfe::ShelfPacker::Slot slot;
+    if (!packInto(job.outline.w, job.outline.h, slot)) return false;
+    c.hasGlyph = true;
+    c.page = slot.page; c.atlasX = slot.x; c.atlasY = slot.y;
+    c.w = job.outline.w; c.h = job.outline.h;
+    GpuCell g;
+    g.glyph = std::move(job.outline);
+    g.page = slot.page; g.x = slot.x; g.y = slot.y;
+    gpuCells_.push_back(std::move(g));
+  }
+  cells_.emplace(cellKey(job.style, job.sizePx, job.cp), c);
+  return true;
 }
 
 bool RasterFont::commitJob(BakeJob& job) {
@@ -393,7 +439,8 @@ int RasterFont::ensureGlyphs(const std::vector<uint32_t>& cps,
     const size_t n = std::min(kBakeBatch, jobs.size() - base);
     rasterizeJobs(jobs.data() + base, n);
     for (size_t i = 0; i < n; ++i) {
-      if (commitJob(jobs[base + i])) added++;
+      if (gpuBake_ ? commitGpuJob(jobs[base + i]) : commitJob(jobs[base + i]))
+        added++;
       jobs[base + i].glyph = vfe::RasterGlyph{};   // release the coverage bytes
     }
   }
