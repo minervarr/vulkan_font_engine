@@ -296,14 +296,35 @@ void RasterFont::rasterizeJobs(BakeJob* jobs, size_t count) {
   for (size_t i = 0; i < count; ++i)
     if (jobs[i].face) (void)faceFor_(jobs[i].face, 0);   // allocate up front
 
+  // One accumulator per worker, reused across every glyph it rasterizes.
+  std::vector<std::vector<int32_t>> scratch(workers);
+
   auto run = [&](uint32_t w) {
     for (size_t i = w; i < count; i += workers) {
       BakeJob& j = jobs[i];
       if (!j.face) continue;
       const vfe::RasterFace* r = &j.face->bakeFaces[w];
       if (!r->isOpen()) r = &j.face->raster;
-      j.ok = gpuBake_ ? r->outline(j.cp, j.sizePx, j.outline)
-                      : r->render(j.cp, j.sizePx, j.glyph);
+      if (gpuBake_) {
+        j.ok = r->outline(j.cp, j.sizePx, j.outline);
+        continue;
+      }
+      // The CPU path runs the SAME two steps the GPU one does — extract the
+      // outline, then rasterize it — instead of FreeType's scan conversion.
+      // That is what puts the finer flattening (1/128 px against FreeType's
+      // quarter pixel) on the default path, and it also makes the two paths
+      // produce the same pixels, so MATRIX_GPU_GLYPHS is a performance switch
+      // rather than a look switch.
+      vfe::OutlineGlyph o;
+      if (!r->outline(j.cp, j.sizePx, o)) continue;
+      j.glyph.w = o.w;
+      j.glyph.h = o.h;
+      j.glyph.bearingX = o.bearingX;
+      j.glyph.bearingY = o.bearingY;
+      j.glyph.advance  = o.advance;
+      if (o.w > 0 && o.h > 0)
+        vfe::areaRasterize(o.edges, o.w, o.h, j.glyph.cov, scratch[w]);
+      j.ok = true;
     }
   };
 

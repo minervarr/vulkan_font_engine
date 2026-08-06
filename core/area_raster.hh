@@ -196,15 +196,25 @@ inline void areaResolveRow(const int32_t* accRow, uint8_t* out, int w) {
 }
 
 // ── The whole thing, for a caller that just wants a cell ────────────────────
+//
+// `acc` is scratch. A caller baking thousands of cells should hand in the same
+// buffer every time — one per thread — rather than let this allocate and free
+// an accumulator per glyph, which at 17,000 cells is pure allocator churn.
 inline void areaRasterize(const std::vector<AreaEdge>& edges, int w, int h,
-                          std::vector<uint8_t>& cov) {
+                          std::vector<uint8_t>& cov, std::vector<int32_t>& acc) {
   cov.assign((size_t)w * h, 0);
   if (w <= 0 || h <= 0) return;
   const int stride = areaAccStride(w);
-  std::vector<int32_t> acc((size_t)stride * h, 0);
+  acc.assign((size_t)stride * h, 0);
   for (const AreaEdge& e : edges) areaAccumulateEdge(acc.data(), w, h, e);
   for (int y = 0; y < h; ++y)
     areaResolveRow(acc.data() + (size_t)y * stride, cov.data() + (size_t)y * w, w);
+}
+
+inline void areaRasterize(const std::vector<AreaEdge>& edges, int w, int h,
+                          std::vector<uint8_t>& cov) {
+  std::vector<int32_t> acc;
+  areaRasterize(edges, w, h, cov, acc);
 }
 
 }  // namespace vfe
