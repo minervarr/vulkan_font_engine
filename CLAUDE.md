@@ -31,7 +31,7 @@ pwsh tools/coverage_test/build.ps1
 - CMake 3.22.1+
 - FreeType and msdfgen — vendored as submodules under `third_party/` (init submodules first)
 - Slang compiler (`slangc`) from the Vulkan SDK — resolved from `$VULKAN_SDK` (override with `-DVFE_SLANGC=...`); required for recompiling shaders
-- `tools/coverage_test` is the only test suite (host-only, no framework/deps beyond the STL) — everything else is manual/visual (the Android demo)
+- Tests: `tools/coverage_test` (CPU port of the tiling/coverage shaders) and `core/tests/gpos_kern_test.cc` (GPOS kern extraction, Debug-only, links `gpos_kern.cc` alone — no FreeType/msdfgen/Vulkan). Everything else is manual/visual (the Android demo)
 
 ## Shader Compilation
 
@@ -52,6 +52,9 @@ One platform-agnostic engine core plus a thin Android demo backend:
 core/                      # vk_font_core STATIC lib — no platform SDK includes
   asset_reader.hh          # THE platform seam: AssetReader (+ FileByteReader for desktop)
   font.* glyphs.* msdf.*   # FreeType wrapper / fallback glyphs / MSDF atlas + OpenType MATH
+  gpos_kern.*              # GPOS kern-pair extraction (pure bytes-in/table-out, no
+                           #   FreeType/msdfgen/Vulkan — see tests/gpos_kern_test.cc).
+                           #   Keep it dependency-free: that is what makes it testable.
   gpu_util.*               # shared Vk helpers (find memory type, load shader module)
   curve_rasterizer.*       # CurveRasterizer: tiling+coverage compute rasterizer
   msdf_renderer.*          # MsdfTextRenderer: MSDF glyph-quad graphics pipeline
@@ -97,7 +100,7 @@ Two independent atlas paths exist — don't confuse them:
     on the format — bump the version word if it ever changes (v2→v3 changed only
     the version word and the meaning of the sheet's alpha bytes).
 
-- **Runtime-generated single-file cache** (magic `'MSDF'`, currently **v9**):
+- **Runtime-generated single-file cache** (magic `'MSDF'`, currently **v10**):
   produced and consumed entirely by `msdf.cc` — `MsdfFont::generate(reader, fontPath,
   cachePath)` rasterizes via msdfgen on first run and `saveCache()`s the result;
   subsequent runs `loadCache()` it back (`generate()` tries the cache first,
@@ -106,6 +109,13 @@ Two independent atlas paths exist — don't confuse them:
   glyphs into the SAME atlas and must be re-saved by the caller if they added
   anything (`hasStyle()`/`hasCodepoint()` let a caller skip a redundant rebake
   after a cache hit that already covered it).
+  - **v10 = v9 + per-style GPOS kern tables**, appended as the LAST block so
+    `ensureAtlasLoaded()`'s header-then-atlas walk is unaffected. Kerning is
+    baked at `generate()`/`addStyle()` time by `gpos_kern.cc` and cached
+    because re-parsing GPOS every launch would cost what this cache exists to
+    avoid. Note NO face this engine ships has a legacy `kern` table — kerning
+    lives in GPOS, so `FT_Get_Kerning()` returns 0 for every pair and cannot
+    be used. Measured on NewCM10-Regular: 16341 pairs, `AV` = -0.111 em.
   - **v9 = v8 + bottom-anchored plane metadata and a denser bake** (EM 40→96,
     sheet width 2048→4096, packing fail-fasts if the sheet exceeds 4096px
     tall): plane boxes are derived from the raster's own bottom anchor

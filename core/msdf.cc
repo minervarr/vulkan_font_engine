@@ -248,7 +248,7 @@ bool MsdfFont::loadCache(const char* cachePath) {
   if (magic != 0x4D534446) return false; // 'MSDF'
   uint32_t version = 0;
   f.read(reinterpret_cast<char*>(&version), sizeof(version));
-  if (version != 9) return false;  // v9: bottom-anchored planes, EM 40->96, AW 4096; v8 was MTSDF
+  if (version != 10) return false;  // v10: + GPOS kern tables; v9 bottom-anchored planes, EM 96
 
   f.read(reinterpret_cast<char*>(&atlasW_), sizeof(atlasW_));
   f.read(reinterpret_cast<char*>(&atlasH_), sizeof(atlasH_));
@@ -297,6 +297,23 @@ bool MsdfFont::loadCache(const char* cachePath) {
     }
   }
 
+  // Kern tables, one block per style (v10+). Baked from GPOS at generate()/
+  // addStyle() time; cached because re-parsing GPOS on every launch would cost
+  // the same as the bake this cache exists to avoid.
+  for (int s = 0; s < kFontStyleCount; ++s) {
+    uint32_t kernCount = 0;
+    f.read(reinterpret_cast<char*>(&kernCount), sizeof(kernCount));
+    if (!f.good()) return false;
+    kern_[s].reserve(kernCount);
+    for (uint32_t i = 0; i < kernCount; ++i) {
+      uint64_t key = 0;
+      float value = 0.0f;
+      f.read(reinterpret_cast<char*>(&key), sizeof(key));
+      f.read(reinterpret_cast<char*>(&value), sizeof(value));
+      kern_[s][key] = value;
+    }
+  }
+
   isMtsdf_ = f.good();  // v8 cache => MTSDF atlas (alpha = true SDF)
   return f.good();
 }
@@ -312,7 +329,7 @@ bool MsdfFont::ensureAtlasLoaded(const char* cachePath) {
   uint32_t magic = 0, version = 0;
   f.read(reinterpret_cast<char*>(&magic), sizeof(magic));
   f.read(reinterpret_cast<char*>(&version), sizeof(version));
-  if (magic != 0x4D534446 || version != 9) return false;
+  if (magic != 0x4D534446 || version != 10) return false;
 
   uint32_t w = 0, h = 0;
   float em = 0, dr = 0;
@@ -339,7 +356,7 @@ bool MsdfFont::saveCache(const char* cachePath) {
   if (!f) return false;
 
   uint32_t magic = 0x4D534446;
-  uint32_t version = 9;  // v9: bottom-anchored planes, EM 40->96, AW 4096
+  uint32_t version = 10;  // v10: + GPOS kern tables; v9 bottom-anchored planes, EM 96
   f.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
   f.write(reinterpret_cast<const char*>(&version), sizeof(version));
   f.write(reinterpret_cast<const char*>(&atlasW_), sizeof(atlasW_));
@@ -377,6 +394,19 @@ bool MsdfFont::saveCache(const char* cachePath) {
       uint32_t cp = pair.first, key = pair.second;
       f.write(reinterpret_cast<const char*>(&cp), sizeof(cp));
       f.write(reinterpret_cast<const char*>(&key), sizeof(key));
+    }
+  }
+
+  // Kern tables (v10+). Last block in the file, so ensureAtlasLoaded()'s
+  // header-then-atlas walk is unaffected.
+  for (int s = 0; s < kFontStyleCount; ++s) {
+    uint32_t kernCount = static_cast<uint32_t>(kern_[s].size());
+    f.write(reinterpret_cast<const char*>(&kernCount), sizeof(kernCount));
+    for (const auto& pair : kern_[s]) {
+      uint64_t key = pair.first;
+      float value = pair.second;
+      f.write(reinterpret_cast<const char*>(&key), sizeof(key));
+      f.write(reinterpret_cast<const char*>(&value), sizeof(value));
     }
   }
 
@@ -507,6 +537,18 @@ bool MsdfFont::generate(AssetReader& reader, const char* fontPath, const char* c
     }
   });
 
+  // GPOS kern pairs for the default face. Parsed from the same bytes msdfgen
+  // just consumed — FreeType cannot supply these, because no face this engine
+  // ships has a legacy `kern` table; see gpos_kern.hh.
+  {
+    auto& kt = kern_[static_cast<int>(FontStyle::Roman)];
+    kt.clear();
+    if (vfe::parseGposKernPairs(fontData.data(), fontData.size(), kt))
+      LOGI("Kerning: %zu GPOS pairs from %s", kt.size(), fontPath);
+    else
+      LOGI("Kerning: no GPOS pairs in %s (laying out unkerned)", fontPath);
+  }
+
   for (auto& c : cells) {
     MsdfGlyph g;
     g.advance = c.advance / metrics.emSize;
@@ -626,6 +668,15 @@ bool MsdfFont::addStyle(AssetReader& reader, const char* fontPath, FontStyle sty
       }
     }
   });
+
+  // This style's own kern pairs — Bold and Italic have different pair values
+  // from Roman, so they get their own table rather than borrowing one.
+  {
+    auto& kt = kern_[static_cast<int>(style)];
+    kt.clear();
+    if (vfe::parseGposKernPairs(fontData.data(), fontData.size(), kt))
+      LOGI("Kerning: %zu GPOS pairs for style %u from %s", kt.size(), styleId, fontPath);
+  }
 
   for (auto& c : cells) {
     MsdfGlyph g;
@@ -784,15 +835,26 @@ float MsdfFont::advance(uint32_t cp, float sizePx) const {
 
 float MsdfFont::textWidth(std::string_view s, float sizePx) const {
   float w = 0.0f;
-  for (size_t i = 0; i < s.size(); ) w += advance(utf8::nextCodepoint(s, i), sizePx);
+  uint32_t prev = 0;
+  for (size_t i = 0; i < s.size(); ) {
+    const uint32_t cp = utf8::nextCodepoint(s, i);
+    // Must mirror layout()'s "kern first, then advance" exactly — see kernEm().
+    w += kernEm(prev, cp) * sizePx + advance(cp, sizePx);
+    prev = cp;
+  }
   return w;
 }
 
 float MsdfFont::layout(uint32_t cp, float penX, float baselineY, float sizePx,
-                       GlyphQuad& q) const {
+                       GlyphQuad& q, uint32_t prevCp) const {
   q.draw = false;
   const MsdfGlyph* g = lookup(cp);
   if (!g) return penX;
+  // Kerning shifts the pen BEFORE this glyph is placed, so it moves the quad
+  // as well as the returned advance. Applied here (rather than by callers) so
+  // that every draw path gets it from one place; textWidth() sums the same
+  // kernEm() so measured and drawn widths cannot drift apart.
+  penX += kernEm(prevCp, cp) * sizePx;
   const MsdfGlyph& gl = *g;
   if (!gl.hasGlyph) return penX + gl.advance * sizePx;  // e.g. space
 
@@ -809,9 +871,10 @@ float MsdfFont::layout(uint32_t cp, float penX, float baselineY, float sizePx,
 
 float MsdfFont::emitGlyph(std::vector<float>& out, uint32_t cp, float penX,
                           float baselineY, float sizePx,
-                          float r, float g, float b, float a) const {
+                          float r, float g, float b, float a,
+                          uint32_t prevCp) const {
   GlyphQuad q;
-  float adv = layout(cp, penX, baselineY, sizePx, q);
+  float adv = layout(cp, penX, baselineY, sizePx, q, prevCp);
   if (!q.draw) return adv;
   auto vert = [&](float x, float y, float u, float v) {
     out.push_back(x); out.push_back(y); out.push_back(u); out.push_back(v);

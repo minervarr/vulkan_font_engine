@@ -32,6 +32,7 @@ add_library(vk_font_core STATIC
     font.cc
     glyphs.cc
     msdf.cc
+    gpos_kern.cc
     gpu_util.cc
     curve_rasterizer.cc
     msdf_renderer.cc
@@ -60,4 +61,19 @@ if(ANDROID)
 else()
     find_package(Vulkan REQUIRED)
     target_link_libraries(vk_font_core PUBLIC Vulkan::Vulkan)
+endif()
+
+# ── Pure-logic tests (Debug-only, no framework) ─────────────────────────────
+# Plain assert()-based exes matching core/tests/*.cc convention. gpos_kern_test
+# links gpos_kern.cc ALONE — not vk_font_core — so the parser stays checkable
+# without FreeType, msdfgen or Vulkan. Don't "simplify" it into linking the
+# library; that coupling is exactly what the split avoids.
+if(NOT ANDROID AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_executable(gpos_kern_test tests/gpos_kern_test.cc gpos_kern.cc)
+    target_include_directories(gpos_kern_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if(MSVC)
+        target_compile_options(gpos_kern_test PRIVATE /W3 /utf-8)
+    else()
+        target_compile_options(gpos_kern_test PRIVATE -Wall)
+    endif()
 endif()

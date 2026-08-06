@@ -1,5 +1,6 @@
 #pragma once
 #include "asset_reader.hh"
+#include "gpos_kern.hh"
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -190,15 +191,42 @@ class MsdfFont {
   float lineHeight(float sizePx) const { return lineHeight_ * sizePx; }
   float ascender(float sizePx) const { return -ascender_ * sizePx; }
 
+  // ── Kerning ──────────────────────────────────────────────────────────────
+  // Horizontal adjustment (EM, negative = tighten) to apply BEFORE drawing
+  // `cp` when it directly follows `prevCp`. 0 when either is 0 (start of run)
+  // or the pair is unkerned.
+  //
+  // Baked from GPOS at generate()/addStyle() time — see gpos_kern.hh for why
+  // FreeType cannot supply this. EVERY path that advances a pen must apply it,
+  // and textWidth() must agree with the emitters exactly: a measure that
+  // disagrees with the draw makes every centred and right-aligned label drift.
+  float kernEm(uint32_t prevCp, uint32_t cp) const {
+    return kernLookup(kern_[static_cast<int>(FontStyle::Roman)], prevCp, cp);
+  }
+  // Same, for a face registered by addStyle(). Falls back to the Roman table
+  // when that style baked no kern data, matching how glyph lookup itself falls
+  // back to the default face.
+  float kernEmStyled(FontStyle s, uint32_t prevCp, uint32_t cp) const {
+    const auto& t = kern_[static_cast<int>(s)];
+    if (t.empty()) return kernEm(prevCp, cp);
+    return kernLookup(t, prevCp, cp);
+  }
+  bool hasKerning(FontStyle s = FontStyle::Roman) const {
+    return !kern_[static_cast<int>(s)].empty();
+  }
+
   // Append one glyph's quad at pen (penX, baselineY). Returns advanced penX.
+  // `prevCp` is the codepoint drawn immediately before this one in the same
+  // run (0 at the start), and supplies the kern pair.
   float emitGlyph(std::vector<float>& out, uint32_t cp, float penX,
                   float baselineY, float sizePx,
-                  float r, float g, float b, float a) const;
+                  float r, float g, float b, float a,
+                  uint32_t prevCp = 0) const;
 
   // Lay out one glyph (no emission) so the caller can clip the quad. Returns
   // the advanced pen X; fills q with geometry (q.draw == false to skip).
   float layout(uint32_t cp, float penX, float baselineY, float sizePx,
-               GlyphQuad& q) const;
+               GlyphQuad& q, uint32_t prevCp = 0) const;
 
   // ── OpenType MATH (font.msdf v2) ─────────────────────────────────────────
   bool hasMath() const { return hasMath_; }
@@ -243,6 +271,12 @@ class MsdfFont {
   VStretch buildVStretch(const MathConstruction& c, float targetEm) const;
 
  private:
+  static float kernLookup(const vfe::KernTable& t, uint32_t prevCp, uint32_t cp) {
+    if (!prevCp || !cp || t.empty()) return 0.0f;
+    const auto it = t.find(vfe::kernKey(prevCp, cp));
+    return it == t.end() ? 0.0f : it->second;
+  }
+
   // Glyph lookup is the font engine's hottest path (every char of every text
   // measure + emit). Codepoints 0x00–0xFF (ASCII + Latin-1 Supplement — the
   // overwhelmingly common case) resolve through a flat array; rarer codepoints
@@ -257,6 +291,9 @@ class MsdfFont {
   std::unordered_map<uint32_t, MsdfGlyph> glyphs_;
   MsdfGlyph fast_[kFastCount];
   bool      fastHas_[kFastCount] = {};
+  // Per-style kern pairs, indexed by FontStyle. Roman is the default face that
+  // generate() bakes; addStyle() fills its own slot from that face's own GPOS.
+  vfe::KernTable kern_[kFontStyleCount];
   std::vector<uint8_t> atlas_;
   uint32_t atlasW_ = 0, atlasH_ = 0;
   bool isMtsdf_ = false;   // see isMtsdf()
