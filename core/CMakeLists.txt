@@ -35,6 +35,7 @@ add_library(vk_font_core STATIC
     gpos_kern.cc
     glyph_raster.cc
     raster_font.cc
+    glyph_baker.cc
     gpu_util.cc
     curve_rasterizer.cc
     msdf_renderer.cc
