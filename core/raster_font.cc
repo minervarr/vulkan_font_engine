@@ -37,24 +37,6 @@ bool loadFace(AssetReader& reader, const char* path, vfe::RasterFace& face,
   return true;
 }
 
-// Every codepoint the face has a real glyph for, over the ranges this UI can
-// encounter. Enumerating the cmap directly would be better, but FreeType's
-// iterator is not exposed through RasterFace and a bounded probe is enough:
-// coverage is only used to decide which face serves which codepoint, and
-// ensureGlyphs() is driven by the codepoints the caller actually needs.
-void probeCoverage(const vfe::RasterFace& face, std::vector<uint32_t>& out) {
-  out.clear();
-  // Latin, Latin-1 Supplement, Latin Extended-A/B, punctuation, Greek,
-  // Cyrillic — the ranges the primary and styled faces are expected to cover.
-  static const uint32_t kRanges[][2] = {
-    {0x0020, 0x024F}, {0x0370, 0x04FF}, {0x2000, 0x206F}, {0x20A0, 0x20BF},
-    {0x2100, 0x214F}, {0x2190, 0x21FF}, {0x2200, 0x22FF},
-  };
-  for (const auto& r : kRanges)
-    for (uint32_t cp = r[0]; cp <= r[1]; ++cp)
-      if (face.hasCodepoint(cp)) out.push_back(cp);
-}
-
 }  // namespace
 
 // ── Setup ───────────────────────────────────────────────────────────────────
@@ -73,7 +55,6 @@ bool RasterFont::open(AssetReader& reader, const char* fontPath) {
     lineHeightEm_ = lh;
   }
 
-  probeCoverage(f->raster, f->cps);
   styles_[(int)FontStyle::Roman] = std::move(f);
   return true;
 }
@@ -82,18 +63,15 @@ bool RasterFont::addStyle(AssetReader& reader, const char* fontPath,
                           FontStyle style) {
   auto f = std::make_unique<Face>();
   if (!loadFace(reader, fontPath, f->raster, f->kern)) return false;
-  probeCoverage(f->raster, f->cps);
   styles_[(int)style] = std::move(f);
   return true;
 }
 
-bool RasterFont::addFallback(AssetReader& reader, const char* fontPath) {
+bool RasterFont::addFallback(AssetReader& reader, const char* fontPath,
+                             FontStyle style) {
   auto f = std::make_unique<Face>();
   if (!loadFace(reader, fontPath, f->raster, f->kern)) return false;
-  // No coverage probe: a fallback is consulted per codepoint on demand, and
-  // probing a CJK face over its tens of thousands of codepoints would cost
-  // more than the bake it is meant to inform.
-  fallbacks_.push_back(std::move(f));
+  fallbacks_[(int)style].push_back(std::move(f));
   return true;
 }
 
@@ -112,20 +90,31 @@ bool RasterFont::hasStyle(FontStyle style) const {
 // ── Face selection ──────────────────────────────────────────────────────────
 
 const RasterFont::Face* RasterFont::faceFor(FontStyle style, uint32_t cp) const {
+  auto covers = [cp](const Face* f) {
+    return f && f->raster.isOpen() && f->raster.hasCodepoint(cp);
+  };
+  auto firstIn = [&](const std::vector<std::unique_ptr<Face>>& v) -> const Face* {
+    for (const auto& f : v)
+      if (covers(f.get())) return f.get();
+    return nullptr;
+  };
+
   // Overrides first — see addOverride() for the PUA collision this exists for.
-  for (const auto& f : overrides_)
-    if (f->raster.isOpen() && f->raster.hasCodepoint(cp)) return f.get();
+  if (const Face* f = firstIn(overrides_)) return f;
 
-  if (const Face* f = styles_[(int)style].get())
-    if (f->raster.isOpen() && f->raster.hasCodepoint(cp)) return f;
+  // THE STYLE'S OWN FACE BEFORE ITS FALLBACKS, always. Every bundled CJK face
+  // also carries Latin, Cyrillic and Greek, so reversing these two lines would
+  // hand Latin text to Fandol Song and quietly replace the app's typeface.
+  if (covers(styles_[(int)style].get())) return styles_[(int)style].get();
+  if (const Face* f = firstIn(fallbacks_[(int)style])) return f;
 
-  if (style != FontStyle::Roman)
-    if (const Face* f = styles_[(int)FontStyle::Roman].get())
-      if (f->raster.isOpen() && f->raster.hasCodepoint(cp)) return f;
-
-  for (const auto& f : fallbacks_)
-    if (f->raster.isOpen() && f->raster.hasCodepoint(cp)) return f.get();
-
+  // Then the default face and its chain, so a style with no cut for this
+  // script degrades to the regular weight rather than to nothing.
+  if (style != FontStyle::Roman) {
+    if (covers(styles_[(int)FontStyle::Roman].get()))
+      return styles_[(int)FontStyle::Roman].get();
+    if (const Face* f = firstIn(fallbacks_[(int)FontStyle::Roman])) return f;
+  }
   return nullptr;
 }
 
@@ -134,14 +123,20 @@ bool RasterFont::hasCodepoint(uint32_t cp) const {
 }
 
 uint32_t RasterFont::keyForStyle(FontStyle s, uint32_t cp) const {
-  // A codepoint an override claims has exactly one rendering, whatever style
-  // asked for it. Returning 0 sends it down Canvas's default-face path, so it
-  // is baked once instead of once per style.
-  for (const auto& f : overrides_)
-    if (f->raster.isOpen() && f->raster.hasCodepoint(cp)) return 0;
+  if (s == FontStyle::Roman) return glyphKey(s, cp);
 
-  const Face* f = styles_[(int)s].get();
-  if (!f || !f->raster.isOpen() || !f->raster.hasCodepoint(cp)) return 0;
+  // A styled key is worth having only when this style resolves to a DIFFERENT
+  // face than Roman would. Otherwise return 0, which sends the codepoint down
+  // Canvas's default-face path (canvas.cc) and shares the Roman cell.
+  //
+  // This is not a micro-optimization, it is what keeps the atlas honest.
+  // Italic and Mono have no CJK counterpart — these scripts have no italic
+  // tradition, and faking one by skewing is worse than not having it — so they
+  // resolve to the very same regular face Roman does. Without this test, every
+  // CJK glyph would be baked a second and third time, byte-identical, under
+  // the Italic and Math keys.
+  const Face* styled = faceFor(s, cp);
+  if (!styled || styled == faceFor(FontStyle::Roman, cp)) return 0;
   return glyphKey(s, cp);
 }
 
@@ -231,12 +226,13 @@ int RasterFont::ensureGlyphs(const std::vector<uint32_t>& cps,
     if (!sf || !sf->raster.isOpen()) continue;
 
     for (uint32_t cp : cps) {
-      // Which face actually serves this codepoint in this style. For a styled
-      // face that does not cover it, keyForStyle() returns 0 and Canvas falls
-      // back to the default face — so there is nothing to bake here.
-      if ((FontStyle)style != FontStyle::Roman) {
-        if (!sf->raster.hasCodepoint(cp)) continue;
-      }
+      // Bake a styled cell only where keyForStyle() will actually hand one
+      // out — i.e. where this style has a genuinely different face for this
+      // codepoint. Everywhere else Canvas draws from the Roman cell, so
+      // baking here would produce an identical copy nothing ever samples.
+      if ((FontStyle)style != FontStyle::Roman &&
+          keyForStyle((FontStyle)style, cp) == 0)
+        continue;
       const Face* use = faceFor((FontStyle)style, cp);
       if (!use) continue;
 

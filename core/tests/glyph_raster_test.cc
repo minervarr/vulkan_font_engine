@@ -212,7 +212,52 @@ int main(int argc, char** argv) {
     assert(checked > 0);
   }
 
-  // ── [6] A moved-from face does not double-free ───────────────────────────
+  // ── [6] The bold CJK faces are genuinely bolder ──────────────────────────
+  //
+  // Every one of these scripts has a matched Bold cut bundled beside its
+  // Regular, and RasterFont's per-style fallback chain is what reaches them.
+  // The failure mode is silent: if the chain resolves back to the Regular
+  // face, bold text still RENDERS, just at the wrong weight — which looks
+  // like working software and is only visible next to bold Latin. Comparing
+  // ink proves the two faces are actually different, so a regression here
+  // fails a test instead of quietly un-bolding every non-Latin title.
+  {
+    struct Pair {
+      const char* regular; const char* bold; uint32_t cp; const char* what;
+    };
+    const Pair pairs[] = {
+      { "/fandol/FandolSong-Regular.otf", "/fandol/FandolSong-Bold.otf",
+        0x516B, "Han (Fandol Song)" },
+      { "/haranoaji/HaranoAjiMincho-Regular.otf", "/haranoaji/HaranoAjiMincho-Bold.otf",
+        0x30A2, "Kana (Harano Aji Mincho)" },
+      { "/unfonts-core/UnBatang.ttf", "/unfonts-core/UnBatangBold.ttf",
+        0xAC00, "Hangul (UnBatang)" },
+    };
+    int checked = 0;
+    for (const Pair& p : pairs) {
+      vfe::RasterFace r, b;
+      if (!openFile(r, dir + p.regular) || !openFile(b, dir + p.bold)) {
+        std::printf("[6] %s: faces not present, skipped\n", p.what);
+        continue;
+      }
+      vfe::RasterGlyph gr, gb;
+      // 26px: a real grid-title size, and the size where a too-light CJK
+      // glyph beside bold Latin is most obvious.
+      assert(r.render(p.cp, 26, gr));
+      assert(b.render(p.cp, 26, gb));
+      assert(gr.w > 0 && gb.w > 0);
+
+      const double ir = inkFraction(gr), ib = inkFraction(gb);
+      assert(ib > ir);          // the whole point
+      assert(ib > ir * 1.05);   // and by a margin a reader can actually see
+      std::printf("[6] %-26s ink regular=%.3f bold=%.3f (+%.0f%%)\n",
+                  p.what, ir, ib, (ib / ir - 1.0) * 100.0);
+      checked++;
+    }
+    assert(checked > 0);
+  }
+
+  // ── [7] A moved-from face does not double-free ───────────────────────────
   // RasterFont stores these in containers, so the move must be sound.
   {
     vfe::RasterFace a;
@@ -222,7 +267,7 @@ int main(int argc, char** argv) {
     assert(!a.isOpen());
     vfe::RasterGlyph g;
     assert(b.render('A', 16, g));
-    std::printf("[6] move leaves the source closed and the target usable\n");
+    std::printf("[7] move leaves the source closed and the target usable\n");
   }
 
   std::printf("glyph_raster_test: all checks passed\n");

@@ -55,12 +55,19 @@ class RasterFont : public TextFont {
   // matching how Canvas::textStyled() already behaves on a keyForStyle() miss.
   bool addStyle(AssetReader& reader, const char* fontPath, FontStyle style);
 
-  // Script-coverage faces (CJK/Hangul/Kana) and the icon font, consulted in
-  // registration order for codepoints the default face lacks. This is the
-  // raster counterpart of MsdfFont::bakeCodepoints()'s fallback chain, and it
-  // feeds the DEFAULT face's table for the same reason: styled text then picks
-  // the glyphs up for free.
-  bool addFallback(AssetReader& reader, const char* fontPath);
+  // Script-coverage faces (CJK/Hangul/Kana), consulted in registration order
+  // for codepoints `style`'s own face lacks.
+  //
+  // Registering a chain PER STYLE is what makes bold text bold in every
+  // script. Song/Mincho/Batang all ship a matched Bold cut, and without a
+  // Bold chain a bold label resolves back to the Regular face: the text still
+  // renders, at the wrong weight, which looks like working software right up
+  // until it sits next to bold Latin.
+  //
+  // Order within a chain is Chinese -> Japanese -> Korean and it matters:
+  // all three faces cover Han and Kana, and only the Korean one has Hangul.
+  bool addFallback(AssetReader& reader, const char* fontPath,
+                   FontStyle style = FontStyle::Roman);
 
   // A face that claims its own codepoints AHEAD of the primary and every
   // style — the icon font, and anything else mapped into the Private Use
@@ -159,11 +166,12 @@ class RasterFont : public TextFont {
     uint32_t atlasX = 0, atlasY = 0;
   };
 
-  // A face plus what it covers and how it kerns.
+  // A face and how it kerns. Coverage is asked of the face itself
+  // (RasterFace::hasCodepoint) rather than cached: a CJK face has tens of
+  // thousands of codepoints and only a few hundred are ever wanted.
   struct Face {
-    vfe::RasterFace     raster;
-    vfe::KernTable      kern;
-    std::vector<uint32_t> cps;   // registered coverage, for ensureGlyphs
+    vfe::RasterFace raster;
+    vfe::KernTable  kern;
   };
 
   // key = style<<56 | sizePx<<32 | codepoint. The pieces never collide:
@@ -207,8 +215,8 @@ class RasterFont : public TextFont {
   bool packInto(int w, int h, uint32_t& outX, uint32_t& outY);
 
   std::unique_ptr<Face> styles_[kFontStyleCount];
-  std::vector<std::unique_ptr<Face>> overrides_;   // consulted before styles_
-  std::vector<std::unique_ptr<Face>> fallbacks_;   // consulted after
+  std::vector<std::unique_ptr<Face>> overrides_;                  // before styles_
+  std::vector<std::unique_ptr<Face>> fallbacks_[kFontStyleCount]; // after
 
   std::unordered_map<uint64_t, Cell> cells_;
   std::set<int> sizes_;              // every size ever requested
