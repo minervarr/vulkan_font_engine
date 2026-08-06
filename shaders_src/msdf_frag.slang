@@ -58,5 +58,45 @@ float4 main(PSIn i) : SV_Target {
 
   float screenPxDist = screenPxRange * (sd - 0.5);
   float a = clamp(screenPxDist + 0.5, 0.0, 1.0);
-  return float4(i.color.rgb, i.color.a * a);
+  float cov = i.color.a * a;
+
+  // ── Gamma-correct coverage blending ──────────────────────────────────────
+  //
+  // The swapchain is R8G8B8A8_UNORM presented as SRGB_NONLINEAR: the bytes we
+  // write ARE sRGB-encoded, but fixed-function blending operates on them as if
+  // they were linear. So the ordinary SRC_ALPHA blend mixes coverage in gamma
+  // space, which is simply wrong — and wrong in a direction that is very
+  // visible for a dark theme with light text.
+  //
+  // Concretely, light text (sRGB 0.9) at 50% coverage over the app's near-black
+  // background: gamma-space blending yields sRGB 0.485, while correct
+  // linear-light blending yields sRGB 0.66. Every antialiased edge pixel comes
+  // out too dark, which reads as text that is too THIN.
+  //
+  // Fix: output PREMULTIPLIED colour that has already been composited in linear
+  // light, and let the pipeline add it (srcColorBlendFactor is ONE — see
+  // createMsdfPipeline in renderer.cc; the two must change together).
+  //
+  //   correct = srgbEncode(linear(colour) * coverage)
+  //
+  // This is EXACT when the destination is black and degrades smoothly as the
+  // destination brightens, because the destination's own share is still
+  // attenuated by (1 - cov) in gamma space. That assumption is a very good fit
+  // here: the theme background is ~#0d0d0d, i.e. 0.4% linear — essentially
+  // black. It is least accurate for text drawn over bright album art.
+  //
+  // The exact alternative is a VK_KHR_swapchain_mutable_format sRGB *view* of
+  // the same swapchain image, which would make the hardware blend in linear
+  // light against the real destination. That needs its own render pass and
+  // framebuffers for the text draw alone; deliberately not done here.
+  // select() rather than ?: — these are componentwise vector conditions, and
+  // Slang deprecates the non-short-circuiting ?: for exactly this use.
+  float3 lin = select(i.color.rgb <= 0.04045,
+                      i.color.rgb / 12.92,
+                      pow((i.color.rgb + 0.055) / 1.055, 2.4));
+  float3 blended = lin * cov;
+  float3 outRgb = select(blended <= 0.0031308,
+                         blended * 12.92,
+                         1.055 * pow(blended, 1.0 / 2.4) - 0.055);
+  return float4(outRgb, cov);
 }
