@@ -47,6 +47,27 @@ float4 main(PSIn i) : SV_Target {
   // precision to flag dense CJK glyphs whose median developed channel-conflict
   // blobs. Coverage has no channels to conflict, so vertex alpha is plain
   // alpha again.
+  // THIS IS THE BRANCH MATRIX PLAYER RUNS. Its RasterFont reports
+  // TextMode::Raster, so mtsdf == 2 on every text draw in that app; the MSDF
+  // path below is never taken there.
+  //
+  // The premultiply here is the same linear-light composite the MSDF path does,
+  // and it carries the same caveat — see the long comment further down before
+  // changing either. In short: emitting `srgbEncode(linear(colour) * coverage)`
+  // against a ONE / ONE_MINUS_SRC_ALPHA blend is EXACT when the destination is
+  // black and degrades as the destination brightens, because the destination's
+  // own share is still attenuated in gamma space.
+  //
+  // What keeps that accurate in practice is an invariant of the APP, not of this
+  // shader: text is never drawn on top of album art. Captions sit under the
+  // artwork and are clipped to its width, and the now-playing marker is a bar
+  // below the tile rather than a badge on it — so the destination behind
+  // essentially all text is a near-black theme colour (~#0d0d0d, 0.4% linear).
+  //
+  // A future feature that overlays a title on a bright image would step outside
+  // that assumption, and its edges would be wrong in a way that looks like bad
+  // antialiasing rather than like bad blending. The fix at that point is the
+  // mutable-format sRGB view described below, not a tweak up here.
   if (push.mtsdf > 1.5) {
     float rcov = i.color.a * msd.r;
     float3 rlin = select(i.color.rgb <= 0.04045,

@@ -119,6 +119,26 @@ class RasterFont : public TextFont {
   // which one it means.
   bool addOverride(AssetReader& reader, const char* fontPath);
 
+  // Register exactly what `src` has registered, over the SAME font bytes.
+  //
+  // For a second window. Opening the faces from disk again costs a full re-read
+  // and re-parse of every face — ~39 MB and the best part of a tenth of a
+  // second for this app's ten — to produce byte-identical data that is already
+  // in memory. RasterFace::openSharedWith() gives each face here its own
+  // FT_Library/FT_Face (which is what FreeType's per-face thread-unsafety
+  // requires) over a shared_ptr to the bytes (which are immutable, and are the
+  // only large part).
+  //
+  // What is NOT shared, and cannot be: the atlas, the cells, the packer, the
+  // size set. Two windows have two Renderers and therefore two VkDevices, and
+  // an atlas image belongs to one of them. This shares the INPUT to baking, not
+  // the result — each window still bakes what it draws, which for an art window
+  // is a few dozen cells.
+  //
+  // `src` must outlive nothing in particular: the bytes are held by shared_ptr,
+  // so this stays valid even if `src` is destroyed first.
+  bool openSharedWith(const RasterFont& src);
+
   bool hasStyle(FontStyle style) const;
 
   // ── Baking ───────────────────────────────────────────────────────────────
@@ -400,7 +420,13 @@ class RasterFont : public TextFont {
 
   // Which face serves `cp` for `style`: the style's own face if it covers it,
   // else the default face, else the fallbacks in order. nullptr if nothing has
-  // it. Also reports which kern table applies.
+  // it.
+  //
+  // COVERAGE ONLY — this does not decide kerning. kernEmStyled() keys off the
+  // requested style and never looks at what faceFor() returned, which is why
+  // fallback and override faces do not have their kern tables parsed at all
+  // (see addFallback() in the .cc). This comment used to claim the opposite;
+  // that claim was never true, and believing it cost ~70 ms of every startup.
   const Face* faceFor(FontStyle style, uint32_t cp) const;
 
   bool bakeCell(const Face& f, FontStyle style, int sizePx, uint32_t cp,

@@ -29,6 +29,7 @@
 
 #undef NDEBUG
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -229,6 +230,129 @@ int main(int argc, char** argv) {
       }
     }
     std::printf("[3] advances are phase-independent\n");
+  }
+
+  // ── [4] openSharedWith: a second window's font, over the same bytes ───────
+  //
+  // The art window opens its own RasterFont because it has its own VkDevice and
+  // therefore its own atlas. It used to re-read ~39 MB of faces from disk to do
+  // it. openSharedWith() gives each face a fresh FT_Face over the FIRST font's
+  // bytes instead.
+  //
+  // This needs its own test because the art window is the ONE surface the
+  // headless capture tool cannot photograph — Host::secondaryWindowHandle() is
+  // null there by design, so ArtWindow::create() declines and no capture ever
+  // contains a pixel of it. A regression here would be invisible to every other
+  // gate in this repo.
+  //
+  // The bar is not "it works" but "it is the same font": same coverage of
+  // codepoints, same style resolution through the fallback chains, same metrics,
+  // same advances, and byte-identical cells.
+  {
+    const std::string dir2 = dir + "/";
+    FileByteReader ld;
+    RasterFont full;
+    const auto tDisk0 = std::chrono::steady_clock::now();
+    assert(full.open(ld, face.c_str()));
+    full.addStyle(ld, (dir2 + "newcomputermodern/NewCM10-Bold.otf").c_str(),
+                  FontStyle::Bold);
+    full.addStyle(ld, (dir2 + "newcomputermodern/NewCM10-Italic.otf").c_str(),
+                  FontStyle::Italic);
+    // The real fallback chain, in the app's order, including the Bold cuts —
+    // this is what makes the style-resolution comparison below mean anything.
+    const char* fb[] = {"fandol/FandolSong-Regular.otf",
+                        "haranoaji/HaranoAjiMincho-Regular.otf",
+                        "unfonts-core/UnBatang.ttf"};
+    const char* fbB[] = {"fandol/FandolSong-Bold.otf",
+                         "haranoaji/HaranoAjiMincho-Bold.otf",
+                         "unfonts-core/UnBatangBold.ttf"};
+    int chain = 0;
+    for (const char* p : fb)  chain += full.addFallback(ld, (dir2 + p).c_str()) ? 1 : 0;
+    for (const char* p : fbB)
+      chain += full.addFallback(ld, (dir2 + p).c_str(), FontStyle::Bold) ? 1 : 0;
+
+    const double diskMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - tDisk0).count();
+
+    RasterFont shared;
+    const auto tShare0 = std::chrono::steady_clock::now();
+    assert(shared.openSharedWith(full));
+    const double shareMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - tShare0).count();
+    std::printf("[4] open from disk %.1f ms -> shared %.1f ms (%.0fx)\n",
+                diskMs, shareMs, diskMs / (shareMs > 0.001 ? shareMs : 0.001));
+
+    // Metrics are EM fractions off the design units — a property of the bytes.
+    assert(shared.lineHeight(37.0f) == full.lineHeight(37.0f));
+    assert(shared.ascender(37.0f)   == full.ascender(37.0f));
+    for (int s = 0; s < kFontStyleCount; ++s)
+      assert(shared.hasStyle(FontStyle(s)) == full.hasStyle(FontStyle(s)));
+
+    // Coverage and style resolution across scripts. U+4E2D/U+AC00/U+3042 are the
+    // whole reason the fallback chains exist and the order within them matters;
+    // if the chains were copied in the wrong order these diverge.
+    const uint32_t probe[] = {0x41,   0x7A,   0xE9,   0x3B1,  0x416,
+                              0x4E2D, 0xAC00, 0x3042, 0xE000, 0x2014};
+    int compared = 0;
+    for (uint32_t cp : probe) {
+      assert(shared.hasCodepoint(cp) == full.hasCodepoint(cp));
+      for (int s = 0; s < kFontStyleCount; ++s) {
+        assert(shared.keyForStyle(FontStyle(s), cp) ==
+               full.keyForStyle(FontStyle(s), cp));
+        assert(shared.kernEmStyled(FontStyle(s), 0x41, cp) ==
+               full.kernEmStyled(FontStyle(s), 0x41, cp));
+        ++compared;
+      }
+    }
+
+    // And the pixels. Bake the same cells in both and compare cell for cell —
+    // the atlases are laid out independently, so this goes through layout and
+    // reads each cell back through its own quad's UVs.
+    std::vector<uint32_t> cps(std::begin(probe), std::end(probe));
+    assert(full.ensureGlyphs(cps, {18, 37}) > 0);
+    assert(shared.ensureGlyphs(cps, {18, 37}) > 0);
+
+    int cells = 0;
+    for (uint32_t cp : cps) {
+      const uint32_t kf = full.keyForStyle(FontStyle::Roman, cp);
+      const uint32_t ks = shared.keyForStyle(FontStyle::Roman, cp);
+      if (kf == 0 || ks == 0) continue;
+      for (float sz : {18.0f, 37.0f}) {
+        GlyphQuad qf, qs;
+        const float af = full.layoutByKey(kf, 3.0f, 100.0f, sz, qf);
+        const float as = shared.layoutByKey(ks, 3.0f, 100.0f, sz, qs);
+        assert(af == as);                 // advance
+        assert(qf.draw == qs.draw);
+        if (!qf.draw) continue;
+        assert(qf.x0 == qs.x0 && qf.y0 == qs.y0);
+        assert(qf.x1 == qs.x1 && qf.y1 == qs.y1);
+        // Same ink, wherever each atlas happened to put it.
+        const uint32_t w = (uint32_t)std::lround((double)(qf.u1 - qf.u0) * full.atlasW());
+        const uint32_t h = (uint32_t)std::lround((double)(qf.v1 - qf.v0) * full.atlasH());
+        assert(w == (uint32_t)std::lround((double)(qs.u1 - qs.u0) * shared.atlasW()));
+        assert(h == (uint32_t)std::lround((double)(qs.v1 - qs.v0) * shared.atlasH()));
+        const std::vector<uint8_t>& af2 = full.atlas();
+        const std::vector<uint8_t>& as2 = shared.atlas();
+        const uint32_t fx = (uint32_t)std::lround((double)qf.u0 * full.atlasW());
+        const uint32_t fy = (uint32_t)std::lround((double)qf.v0 * full.atlasH());
+        const uint32_t sx = (uint32_t)std::lround((double)qs.u0 * shared.atlasW());
+        const uint32_t sy = (uint32_t)std::lround((double)qs.v0 * shared.atlasH());
+        for (uint32_t y = 0; y < h; ++y)
+          for (uint32_t x = 0; x < w; ++x) {
+            const size_t io = (size_t)qf.page * full.atlasW() * full.atlasH() +
+                              (size_t)(fy + y) * full.atlasW() + fx + x;
+            const size_t is = (size_t)qs.page * shared.atlasW() * shared.atlasH() +
+                              (size_t)(sy + y) * shared.atlasW() + sx + x;
+            assert(af2[io] == as2[is]);
+          }
+        ++cells;
+      }
+    }
+
+    std::printf("[4] openSharedWith: %d fallback faces, %d style probes, "
+                "%d cells byte-identical\n", chain, compared, cells);
+    assert(chain >= 1);    // the chain must actually have been exercised
+    assert(cells >= 8);
   }
 
   std::printf("raster_font_test: all checks passed\n");

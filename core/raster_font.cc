@@ -12,8 +12,25 @@
 
 namespace {
 
+// `kern` may be NULL, meaning "do not parse this face's kern table".
+//
+// Not an optimization bolted on afterwards — it is the difference between
+// parsing something and parsing something NOTHING CAN READ. kernEmStyled()
+// keys off the REQUESTED STYLE, not the resolved face: it looks in
+// styles_[style], then styles_[Roman], and stops. It never reaches
+// fallbacks_[] or overrides_. So a kern table parsed for a fallback face is
+// written once and read never.
+//
+// The cost was not small. Seven of the ten faces this app registers are
+// fallbacks or overrides, and the two Harano Aji Mincho cuts alone take 30 ms
+// and 34 ms to yield 26601 and 29660 pairs that no code path can consult —
+// paid on the main thread at startup, and paid TWICE, because the art window
+// keeps its own RasterFont.
+//
+// See addFallback()/addOverride() for the invariant this rests on and what
+// would invalidate it.
 bool loadFace(AssetReader& reader, const char* path, vfe::RasterFace& face,
-              vfe::KernTable& kern) {
+              vfe::KernTable* kern) {
   std::vector<uint8_t> buf;
   if (!reader.read(path, buf) || buf.empty()) {
     VFE_LOGE("Raster", "Raster: cannot read font %s", path);
@@ -25,7 +42,7 @@ bool loadFace(AssetReader& reader, const char* path, vfe::RasterFace& face,
   }
   // Not an error when absent: some faces genuinely have no GPOS kern data and
   // simply lay out unkerned. See gpos_kern.hh.
-  vfe::parseGposKernPairs(buf.data(), buf.size(), kern);
+  if (kern) vfe::parseGposKernPairs(buf.data(), buf.size(), *kern);
   return true;
 }
 
@@ -35,7 +52,7 @@ bool loadFace(AssetReader& reader, const char* path, vfe::RasterFace& face,
 
 bool RasterFont::open(AssetReader& reader, const char* fontPath) {
   auto f = std::make_unique<Face>();
-  if (!loadFace(reader, fontPath, f->raster, f->kern)) return false;
+  if (!loadFace(reader, fontPath, f->raster, &f->kern)) return false;
 
   // Vertical metrics as EM fractions, taken once from the DESIGN units.
   // Deriving them from verticalMetrics() at some probe size would bake that
@@ -54,23 +71,82 @@ bool RasterFont::open(AssetReader& reader, const char* fontPath) {
 bool RasterFont::addStyle(AssetReader& reader, const char* fontPath,
                           FontStyle style) {
   auto f = std::make_unique<Face>();
-  if (!loadFace(reader, fontPath, f->raster, f->kern)) return false;
+  if (!loadFace(reader, fontPath, f->raster, &f->kern)) return false;
   styles_[(int)style] = std::move(f);
   return true;
 }
 
+// ── Why these two do not parse kerning ──────────────────────────────────────
+//
+// kernEmStyled() consults styles_[style] and then styles_[Roman], and nothing
+// else. A fallback or override face is chosen by faceFor() for its COVERAGE —
+// which face has a glyph for this codepoint — while the kern table is picked
+// by the style that was ASKED FOR. The two are decided independently, so a
+// fallback's own table is unreachable by construction, not merely unused today.
+//
+// THE INVARIANT: if kerning is ever made to follow faceFor() instead of the
+// requested style, these tables become live and both calls below must go back
+// to passing &f->kern. The stale note that used to sit on faceFor() ("Also
+// reports which kern table applies") suggests that was once the intent; it
+// was never wired up, and the parse was left behind.
+//
+// Worth knowing before anyone tries: CJK and Hangul are not pair-kerned in any
+// practical sense, so wiring it up would be a near-empty win bought at exactly
+// the faces that cost the most to parse.
 bool RasterFont::addFallback(AssetReader& reader, const char* fontPath,
                              FontStyle style) {
   auto f = std::make_unique<Face>();
-  if (!loadFace(reader, fontPath, f->raster, f->kern)) return false;
+  if (!loadFace(reader, fontPath, f->raster, nullptr)) return false;
   fallbacks_[(int)style].push_back(std::move(f));
   return true;
 }
 
 bool RasterFont::addOverride(AssetReader& reader, const char* fontPath) {
   auto f = std::make_unique<Face>();
-  if (!loadFace(reader, fontPath, f->raster, f->kern)) return false;
+  if (!loadFace(reader, fontPath, f->raster, nullptr)) return false;
   overrides_.push_back(std::move(f));
+  return true;
+}
+
+bool RasterFont::openSharedWith(const RasterFont& src) {
+  if (!src.styles_[(int)FontStyle::Roman] ||
+      !src.styles_[(int)FontStyle::Roman]->raster.isOpen())
+    return false;
+
+  // One face over another's bytes. Returns null if the source face is closed,
+  // so a partially-built source degrades to "that face is absent" rather than
+  // to a half-open one.
+  auto share = [](const Face& from) -> std::unique_ptr<Face> {
+    auto f = std::make_unique<Face>();
+    if (!f->raster.openSharedWith(from.raster)) return nullptr;
+    // The kern table is COPIED, not re-parsed. Only styles_ carry one that
+    // anything reads (see addFallback), and copying ~60k pairs is far cheaper
+    // than parsing GPOS again — which is the cost this whole method exists to
+    // avoid.
+    f->kern = from.kern;
+    return f;
+  };
+
+  for (int i = 0; i < kFontStyleCount; ++i) {
+    if (!src.styles_[i]) continue;
+    if (auto f = share(*src.styles_[i])) styles_[i] = std::move(f);
+  }
+  if (!styles_[(int)FontStyle::Roman]) return false;
+
+  // Order is preserved in both chains. It is load-bearing in fallbacks_
+  // (Chinese -> Japanese -> Korean, see addFallback) and in overrides_, which
+  // are consulted ahead of every style.
+  for (const auto& o : src.overrides_)
+    if (auto f = share(*o)) overrides_.push_back(std::move(f));
+  for (int i = 0; i < kFontStyleCount; ++i)
+    for (const auto& fb : src.fallbacks_[i])
+      if (auto f = share(*fb)) fallbacks_[i].push_back(std::move(f));
+
+  // Vertical metrics are EM fractions read off the face's design units, so they
+  // are a property of the bytes and copy exactly.
+  ascenderEm_   = src.ascenderEm_;
+  descenderEm_  = src.descenderEm_;
+  lineHeightEm_ = src.lineHeightEm_;
   return true;
 }
 
