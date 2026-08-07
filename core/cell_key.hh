@@ -46,7 +46,29 @@ inline constexpr uint32_t kMaxCodepoint = 0x10FFFF;
 // staying well inside a page (see shelf_packer.hh).
 inline constexpr uint32_t kMaxCellPx = 512;
 
-// ── Cell key: (style, sizePx, codepoint) -> uint64 ─────────────────────────
+// ── Subpixel phases ────────────────────────────────────────────────────────
+//
+// How many horizontal positions within a pixel a glyph may be baked at.
+//
+// Text is laid out with a float pen, and a cell can only be blitted on a whole
+// texel — so the position has to be quantized somewhere. Snapping the pen to
+// the nearest pixel (what this did before) puts up to half a pixel of error on
+// EVERY glyph independently, which is not a shift of the word but a jitter
+// inside it: at an 18 px caption a half pixel is ~3% of a glyph width, and the
+// spacing between letters visibly bunches and gaps.
+//
+// Baking each glyph at three sub-positions cuts that error to a sixth of a
+// pixel. Three rather than four because it is the point where the remaining
+// error drops below the rasterizer's own (see area_raster_test's +/-2/255) and
+// because the cost is linear: every phase is a whole extra copy of the cell in
+// the atlas.
+//
+// VERTICAL phases are deliberately NOT done. The baseline is shared by every
+// glyph on a line, so rounding it moves the whole line together — there is no
+// jitter to remove — and it would multiply the atlas again for that.
+inline constexpr uint32_t kPhaseCount = 3;
+
+// ── Cell key: (style, sizePx, phase, codepoint) -> uint64 ──────────────────
 //
 // Identifies one baked cell. Widths first; positions are derived below and are
 // deliberately not written out anywhere.
@@ -54,16 +76,19 @@ inline constexpr uint32_t kMaxCellPx = 512;
 inline constexpr int kCpBits    = 21;   // 0x10FFFF needs 21
 inline constexpr int kSizeBits  = 13;   // kMaxCellPx needs 10; 13 leaves room
 inline constexpr int kStyleBits = 3;    // kFontStyleCount == 4 needs 2
+inline constexpr int kPhaseBits = 2;    // kPhaseCount == 3 needs 2
 
 inline constexpr int kCpShift    = 0;
-inline constexpr int kSizeShift  = kCpShift   + kCpBits;
-inline constexpr int kStyleShift = kSizeShift + kSizeBits;
+inline constexpr int kSizeShift  = kCpShift    + kCpBits;
+inline constexpr int kStyleShift = kSizeShift  + kSizeBits;
+inline constexpr int kPhaseShift = kStyleShift + kStyleBits;
 
 inline constexpr uint64_t kCpMask    = (uint64_t{1} << kCpBits)    - 1;
 inline constexpr uint64_t kSizeMask  = (uint64_t{1} << kSizeBits)  - 1;
 inline constexpr uint64_t kStyleMask = (uint64_t{1} << kStyleBits) - 1;
+inline constexpr uint64_t kPhaseMask = (uint64_t{1} << kPhaseBits) - 1;
 
-static_assert(kStyleShift + kStyleBits <= 64,
+static_assert(kPhaseShift + kPhaseBits <= 64,
               "cell key fields do not fit in a uint64_t");
 static_assert(kMaxCodepoint <= kCpMask,
               "codepoint field is too narrow for Unicode");
@@ -71,22 +96,30 @@ static_assert(kMaxCellPx <= kSizeMask,
               "size field is too narrow for kMaxCellPx");
 static_assert(uint64_t(kFontStyleCount) - 1 <= kStyleMask,
               "style field is too narrow for kFontStyleCount");
+static_assert(uint64_t(kPhaseCount) - 1 <= kPhaseMask,
+              "phase field is too narrow for kPhaseCount");
 
 struct CellFields {
   FontStyle style = FontStyle::Roman;
   uint32_t  sizePx = 0;
   uint32_t  cp = 0;
+  uint32_t  phase = 0;
 };
 
 // Values wider than their field are masked rather than aliased into the next
 // one. Callers must not rely on that: quantize() clamps the size and faceFor()
 // only ever sees real codepoints. It exists so a future caller's mistake stays
 // inside its own field instead of silently becoming a different cell.
+//
+// `phase` is last and defaults to 0 so a caller that does not position
+// subpixel-precisely — the advance queries, and every test written before
+// phases existed — asks for the on-the-pixel cell without saying so.
 inline constexpr uint64_t encodeCell(FontStyle style, uint32_t sizePx,
-                                     uint32_t cp) {
-  return ((uint64_t(uint8_t(style)) & kStyleMask) << kStyleShift) |
-         ((uint64_t(sizePx)         & kSizeMask)  << kSizeShift)  |
-         ((uint64_t(cp)             & kCpMask)    << kCpShift);
+                                     uint32_t cp, uint32_t phase = 0) {
+  return ((uint64_t(phase)           & kPhaseMask) << kPhaseShift) |
+         ((uint64_t(uint8_t(style))  & kStyleMask) << kStyleShift) |
+         ((uint64_t(sizePx)          & kSizeMask)  << kSizeShift)  |
+         ((uint64_t(cp)              & kCpMask)    << kCpShift);
 }
 
 inline constexpr CellFields decodeCell(uint64_t key) {
@@ -94,6 +127,7 @@ inline constexpr CellFields decodeCell(uint64_t key) {
       FontStyle(uint8_t((key >> kStyleShift) & kStyleMask)),
       uint32_t((key >> kSizeShift) & kSizeMask),
       uint32_t((key >> kCpShift) & kCpMask),
+      uint32_t((key >> kPhaseShift) & kPhaseMask),
   };
 }
 
@@ -173,6 +207,37 @@ static_assert(decodeCell(encodeCell(FontStyle::Bold, 22, 0x4E2D)).sizePx == 22, 
 static_assert(decodeCell(encodeCell(FontStyle::Math, 22, 0x4E2D)).sizePx == 22, "");
 static_assert(encodeCell(FontStyle::Bold, 22, 0x4E2D) !=
                   encodeCell(FontStyle::Math, 22, 0x4E2D), "");
+
+// The phase field, held to exactly the same standard — it is the newest field
+// and therefore the one most likely to be given an overlapping position by a
+// later edit.
+static_assert(decodeCell(encodeCell(FontStyle::Roman, 18, 0x41, 0)).phase == 0, "");
+static_assert(decodeCell(encodeCell(FontStyle::Roman, 18, 0x41, 1)).phase == 1, "");
+static_assert(decodeCell(encodeCell(FontStyle::Roman, 18, 0x41, 2)).phase == 2, "");
+static_assert(decodeCell(encodeCell(FontStyle(kFontStyleCount - 1),
+                                    uint32_t(kSizeMask), kMaxCodepoint,
+                                    kPhaseCount - 1)).phase == kPhaseCount - 1, "");
+
+// A phase must be a DIFFERENT cell, and must disturb nothing else. The three
+// phases of one glyph are distinct cells with identical metrics, so a phase
+// that leaked into the size field would ask for a nonsense bake, and one that
+// leaked nowhere at all would silently collapse the three back into one and
+// make the whole feature a no-op that still costs the atlas nothing to notice.
+static_assert(encodeCell(FontStyle::Italic, 18, 0x41, 0) !=
+                  encodeCell(FontStyle::Italic, 18, 0x41, 1), "");
+static_assert(encodeCell(FontStyle::Italic, 18, 0x41, 1) !=
+                  encodeCell(FontStyle::Italic, 18, 0x41, 2), "");
+static_assert(decodeCell(encodeCell(FontStyle::Italic, 18, 0x41, 2)).sizePx == 18, "");
+static_assert(decodeCell(encodeCell(FontStyle::Italic, 18, 0x41, 2)).cp == 0x41, "");
+static_assert(decodeCell(encodeCell(FontStyle::Italic, 18, 0x41, 2)).style ==
+                  FontStyle::Italic, "");
+// ...and symmetrically, the fields that existed first must not disturb it.
+static_assert(decodeCell(encodeCell(FontStyle::Math, 512, kMaxCodepoint, 1)).phase == 1, "");
+
+// Phase 0 is what an omitted argument means. Every advance query and every
+// pre-phase test relies on this.
+static_assert(encodeCell(FontStyle::Bold, 22, 0x4E2D) ==
+                  encodeCell(FontStyle::Bold, 22, 0x4E2D, 0), "");
 
 static_assert(glyphKeyValid(encodeGlyph(FontStyle::Roman, 0)), "");
 static_assert(encodeGlyph(FontStyle::Roman, 0) != kNoGlyphKey,

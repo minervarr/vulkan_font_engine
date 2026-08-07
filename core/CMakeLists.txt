@@ -108,6 +108,20 @@ if(NOT ANDROID AND CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(area_raster_test PRIVATE -Wall)
     endif()
 
+    # raster_font_test measures the CACHE, not a rasterizer: how far a drawn
+    # glyph lands from where the pen said, which is the text path's positional
+    # fidelity in one number. It therefore needs the real RasterFont, so unlike
+    # the two above it links raster_font.cc + gpos_kern.cc as well.
+    add_executable(raster_font_test tests/raster_font_test.cc
+                   raster_font.cc glyph_raster.cc gpos_kern.cc)
+    target_include_directories(raster_font_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(raster_font_test PRIVATE freetype)
+    if(MSVC)
+        target_compile_options(raster_font_test PRIVATE /W3 /utf-8)
+    else()
+        target_compile_options(raster_font_test PRIVATE -Wall)
+    endif()
+
     # cell_key_test and shelf_packer_test link NOTHING AT ALL — both headers
     # are self-contained by design, and that is what lets the two pieces the
     # raster cache is built on be checked as arithmetic instead of as a

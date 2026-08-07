@@ -88,12 +88,25 @@ class RasterFace {
   //
   // `out.edges` are in CELL-LOCAL pixel coordinates (x right, y DOWN, origin at
   // the cell's top-left texel), and out.w/h/bearingX/bearingY/advance are
-  // exactly what render() would have reported. That correspondence is the
-  // whole point: it lets a different rasterizer be measured against FreeType's
-  // pixel for pixel, and it is the only reason a comparison means anything.
+  // exactly what render() would have reported at phase 0. That correspondence
+  // is the whole point: it lets a different rasterizer be measured against
+  // FreeType's pixel for pixel, and it is the only reason a comparison means
+  // anything.
+  //
+  // `phase` shifts the outline RIGHT by phase/kPhaseCount of a pixel before
+  // anything else happens, so the ink lands at a sub-texel offset inside a cell
+  // that is still whole texels. Everything downstream — the grid-fitted box,
+  // bearingX, w — is computed from the SHIFTED outline, which is what makes the
+  // cell drawable at `floor(penX) + bearingX` with no further correction. A
+  // shifted glyph may come out one pixel wider than the same glyph at phase 0;
+  // that is correct, not slack.
+  //
+  // `advance` does NOT depend on the phase. The pen is float and accumulates
+  // exact advances; the phase only decides which pre-shifted copy is blitted.
   //
   // Cheap — this is the part of glyph loading that ISN'T the expensive part.
-  bool outline(uint32_t cp, int sizePx, OutlineGlyph& out) const;
+  bool outline(uint32_t cp, int sizePx, OutlineGlyph& out,
+               uint32_t phase = 0) const;
 
   // Vertical metrics as EM fractions, straight from the face's design units.
   //

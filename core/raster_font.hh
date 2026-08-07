@@ -6,6 +6,7 @@
 #include "shelf_packer.hh"
 #include "text_font.hh"
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <set>
@@ -21,11 +22,15 @@
 //
 // Three properties are load-bearing:
 //
-// 1. **Cells are keyed (style, sizePx, codepoint), with sizePx an INTEGER.**
-//    Quantizing at the key is what stops two sizes a hundredth of a pixel
-//    apart from each baking their own copy of the library. It also pairs with
-//    the whole-pixel pen snapping below: a cell drawn at the size it was baked
-//    at, on a pixel boundary, is exact.
+// 1. **Cells are keyed (style, sizePx, phase, codepoint), with sizePx an
+//    INTEGER.** Quantizing the size at the key is what stops two sizes a
+//    hundredth of a pixel apart from each baking their own copy of the
+//    library. The PHASE is the opposite trade, made deliberately: the pen's
+//    horizontal fraction is not thrown away but baked into a few pre-shifted
+//    copies of the cell, so a glyph lands within a sixth of a pixel of where
+//    the pen actually is instead of within a half. See
+//    vfe::cellkey::kPhaseCount for why three, and phaseCount() for why only at
+//    small sizes.
 //
 // 2. **layout() is const and never bakes.** Canvas holds a `const TextFont*`
 //    and draws from the render thread; baking there would mean growing the
@@ -285,6 +290,7 @@ class RasterFont : public TextFont {
     FontStyle   style = FontStyle::Roman;
     int         sizePx = 0;
     uint32_t    cp = 0;
+    uint32_t    phase = 0;
     vfe::RasterGlyph glyph;
     vfe::OutlineGlyph outline;   // GPU mode fills this instead
     bool        ok = false;
@@ -313,8 +319,9 @@ class RasterFont : public TextFont {
   // from declared widths and the round-trips are proved with static_assert.
   // They were written out by hand here, and the cell key's style bits sat
   // INSIDE its size field — see that header for what it cost.
-  static uint64_t cellKey(FontStyle s, int sizePx, uint32_t cp) {
-    return vfe::cellkey::encodeCell(s, (uint32_t)sizePx, cp);
+  static uint64_t cellKey(FontStyle s, int sizePx, uint32_t cp,
+                          uint32_t phase = 0) {
+    return vfe::cellkey::encodeCell(s, (uint32_t)sizePx, cp, phase);
   }
   static uint32_t glyphKey(FontStyle s, uint32_t cp) {
     return vfe::cellkey::encodeGlyph(s, cp);
@@ -339,12 +346,56 @@ class RasterFont : public TextFont {
     return px;
   }
 
-  const Cell* find(FontStyle s, int sizePx, uint32_t cp) const {
-    const uint64_t k = cellKey(s, sizePx, cp);
+  const Cell* find(FontStyle s, int sizePx, uint32_t cp,
+                   uint32_t phase = 0) const {
+    const uint64_t k = cellKey(s, sizePx, cp, phase);
     auto it = cells_.find(k);
     if (it != cells_.end()) return &it->second;
     if (!unservable_.count(k)) misses_.insert(k);
     return nullptr;
+  }
+
+  // ── Where subpixel phases are worth their memory ─────────────────────────
+  //
+  // Every extra phase is a whole extra copy of a cell, and a cell's area grows
+  // with the SQUARE of its size — so the atlas cost of phases is concentrated
+  // exactly where the benefit is smallest. Half a pixel is ~3% of an 18 px
+  // caption's glyph and ~0.4% of a 120 px title's: the small text is where
+  // uneven spacing is visible, and the large text is where tripling the atlas
+  // actually hurts.
+  //
+  // So phases are baked below this size and not above it. The number is a
+  // measurement, not a guess — see the commit that introduced it.
+  //
+  // This is consulted by BOTH the bake and the layout, through this one
+  // function. If they ever disagreed, layout would ask for a phase nothing
+  // baked and record a miss for it every single frame, forever.
+  static constexpr int kMaxPhasedPx = 48;
+  static uint32_t phaseCount(int sizePx) {
+    return sizePx <= kMaxPhasedPx ? vfe::cellkey::kPhaseCount : 1u;
+  }
+
+  // Snap a float pen to the nearest available sub-position, splitting the
+  // result into the whole pixel the cell is blitted at and the phase it was
+  // baked at.
+  //
+  // The two come out of ONE rounding, deliberately. Rounding the pixel and the
+  // phase separately has a boundary case that is easy to get wrong and hard to
+  // see: a pen at x.9 rounds to phase 3 of 3, which is not a phase — it is
+  // phase 0 of the NEXT pixel, and a version that clamps it back to phase 2
+  // leaves the glyph a third of a pixel short exactly when it sits just under a
+  // boundary. Rounding to the nearest 1/n first and then dividing makes the
+  // carry fall out of the arithmetic instead of needing to be spotted.
+  static void snapPen(float penX, int sizePx, float& xOut, uint32_t& phaseOut) {
+    const uint32_t n = phaseCount(sizePx);
+    if (n <= 1) { xOut = std::round(penX); phaseOut = 0; return; }
+    const long q = std::lround((double)penX * (double)n);   // nearest 1/n
+    // Floor division: penX is negative for anything scrolled off the left, and
+    // C's truncating division would round those toward zero and shift them.
+    const long ln = (long)n;
+    const long px = q >= 0 ? q / ln : -((-q + ln - 1) / ln);
+    xOut     = (float)px;
+    phaseOut = (uint32_t)(q - px * ln);   // always in [0, n)
   }
 
   // Which face serves `cp` for `style`: the style's own face if it covers it,
@@ -352,7 +403,8 @@ class RasterFont : public TextFont {
   // it. Also reports which kern table applies.
   const Face* faceFor(FontStyle style, uint32_t cp) const;
 
-  bool bakeCell(const Face& f, FontStyle style, int sizePx, uint32_t cp);
+  bool bakeCell(const Face& f, FontStyle style, int sizePx, uint32_t cp,
+                uint32_t phase);
   bool packInto(int w, int h, vfe::ShelfPacker::Slot& out);
 
   // Byte index of (page, x, y) in the page-major backing store.

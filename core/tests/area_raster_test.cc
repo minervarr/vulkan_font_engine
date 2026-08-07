@@ -29,6 +29,7 @@
 #include FT_IMAGE_H
 
 #include "../area_raster.hh"
+#include "../cell_key.hh"
 #include "../glyph_raster.hh"
 
 namespace {
@@ -348,6 +349,110 @@ int main(int argc, char** argv) {
     assert(r.maxAbs <= 4);
     assert(r.over8 == 0);
     assert((double)r.exact / (double)r.total >= 0.90);
+  }
+
+  // ── [5] Subpixel phases actually move the ink ─────────────────────────────
+  //
+  // This is the test the phase feature cannot survive without. Baking three
+  // phases per cell is expensive and entirely invisible when it silently does
+  // nothing: if outline()'s shift were dropped, or the phase never reached it,
+  // every phase would bake IDENTICAL pixels, the atlas would be three times
+  // the size for no reason, and the text would look exactly as it did before.
+  // Nothing else in the suite would notice.
+  //
+  // So measure the thing the feature claims: the horizontal CENTROID of the
+  // ink, in absolute pen-relative pixels (cell-local centroid + bearingX,
+  // because a shifted glyph's cell can start one pixel further left). Phase p
+  // must sit p/kPhaseCount of a pixel to the right of phase 0.
+  {
+    const uint32_t n = vfe::cellkey::kPhaseCount;
+    double worst = 0.0, sumErr = 0.0, minDelta = 1e9;
+    size_t checked = 0, identical = 0;
+    uint32_t worstCp = 0;
+    int worstSz = 0;
+
+    for (uint32_t cp : {0x48u, 0x6Fu, 0x69u, 0x41u, 0x6Du, 0x2Eu}) {   // H o i A m .
+      for (int sz : {12, 18, 24, 37, 48}) {
+        double base = 0.0;
+        bool haveBase = false;
+        std::vector<uint8_t> baseCov;
+        int baseW = 0, baseH = 0;
+
+        for (uint32_t ph = 0; ph < n; ++ph) {
+          vfe::OutlineGlyph o;
+          if (!face.outline(cp, sz, o, ph)) continue;
+          if (o.w <= 0 || o.h <= 0) continue;
+
+          std::vector<uint8_t> cov;
+          vfe::areaRasterize(o.edges, o.w, o.h, cov);
+
+          double sum = 0.0, wsum = 0.0;
+          for (int y = 0; y < o.h; ++y)
+            for (int x = 0; x < o.w; ++x) {
+              const double c = cov[(size_t)y * o.w + x];
+              sum  += c;
+              wsum += c * ((double)x + 0.5);
+            }
+          if (sum <= 0.0) continue;
+
+          // Absolute, not cell-local: bearingX is where the cell starts.
+          const double centroid = wsum / sum + (double)o.bearingX;
+          if (ph == 0) {
+            base = centroid; haveBase = true;
+            baseCov = cov; baseW = o.w; baseH = o.h;
+            continue;
+          }
+          if (!haveBase) continue;
+
+          // The bluntest no-op check there is: a phase that never reached
+          // outline() bakes the very same bytes as phase 0.
+          if (o.w == baseW && o.h == baseH && cov == baseCov) identical++;
+
+          const double delta = centroid - base;
+          const double want  = (double)ph / (double)n;
+          const double err   = std::fabs(delta - want);
+          if (err > worst) { worst = err; worstCp = cp; worstSz = sz; }
+          if (delta < minDelta) minDelta = delta;
+          sumErr += err;
+          checked++;
+        }
+      }
+    }
+
+    std::printf("[5] subpixel phases: %zu comparisons, %zu identical, "
+                "centroid shift error mean %.4f worst %.4f px "
+                "(ideal 1/%u = %.4f, worst U+%04X @ %dpx)\n",
+                checked, identical, sumErr / (double)checked, worst, n,
+                1.0 / (double)n, worstCp, worstSz);
+
+    assert(checked >= 40);   // the sweep must not have silently done nothing
+
+    // THE assertion. A phase that did not reach the rasterizer produces
+    // byte-identical cells, and every other number here would still look
+    // plausible — the shift errors would all read as a flat 1/3 "error" that a
+    // loose enough bound would wave through.
+    assert(identical == 0);
+
+    // Every phase moves the ink RIGHT, and by enough that it cannot be noise:
+    // the smallest real shift is 1/3 px, so anything under half of that is a
+    // phase that did not take.
+    assert(minDelta > 0.5 / (double)n);
+
+    // How far off the ideal a shift may read.
+    //
+    // Note what this is NOT bounding. The shift itself is exact to ~0.005 px
+    // (64/3 is not an integer in 26.6, so a third of a pixel is 21/64). The
+    // residual measured here is the CENTROID's own discretization: summing
+    // area_i * (x_i + 0.5) over pixels is a box quadrature of the true first
+    // moment, and its error depends on where the shape sits against the grid —
+    // so it changes as the glyph moves, which is exactly what is being varied.
+    // It is largest on the smallest glyphs, where there are fewest pixels to
+    // average over (measured worst: U+002E at 12 px, a period ~2 px across).
+    //
+    // Bounded loosely on the worst case and tightly on the mean, because the
+    // mean is the number that would actually move if the shift were wrong.
+    assert(sumErr / (double)checked < 0.03);
+    assert(worst < 0.15);
   }
 
   std::printf("area_raster_test: all checks passed\n");

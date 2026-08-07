@@ -1,5 +1,11 @@
 #include "glyph_raster.hh"
 
+// For kPhaseCount alone. The phase denominator MUST be the one the cell key
+// encodes — a face that shifted by thirds while the key indexed quarters would
+// bake perfectly good glyphs at positions nothing ever asks for. cell_key.hh
+// pulls in text_font.hh, which is <cstdint>/<string_view>/<vector> and nothing
+// else, so this keeps glyph_raster_test's standalone link intact.
+#include "cell_key.hh"
 #include "log.hh"
 
 #include <ft2build.h>
@@ -276,10 +282,12 @@ int cbCubic(const FT_Vector* c1, const FT_Vector* c2, const FT_Vector* to,
 
 }  // namespace
 
-bool RasterFace::outline(uint32_t cp, int sizePx, OutlineGlyph& out) const {
+bool RasterFace::outline(uint32_t cp, int sizePx, OutlineGlyph& out,
+                         uint32_t phase) const {
   out = OutlineGlyph{};
   if (!face_ || sizePx <= 0) return false;
   if ((uint32_t)sizePx > kMaxRenderPx) return false;
+  if (phase >= vfe::cellkey::kPhaseCount) return false;
 
   FT_Face f = face(face_);
   const FT_UInt gid = FT_Get_Char_Index(f, (FT_ULong)cp);
@@ -292,6 +300,29 @@ bool RasterFace::outline(uint32_t cp, int sizePx, OutlineGlyph& out) const {
   if (f->glyph->format != FT_GLYPH_FORMAT_OUTLINE) return false;
 
   FT_Outline& ol = f->glyph->outline;
+
+  // ── The subpixel shift ───────────────────────────────────────────────────
+  //
+  // Applied to the OUTLINE, before the box is measured, rather than to the
+  // edges afterwards. Doing it here is what makes everything below — the
+  // grid-fitted box, bearingX, w, and the cell-local origin the edges are
+  // expressed against — describe the shifted glyph consistently. Shifting the
+  // edges after the box had been measured would move the ink inside a cell
+  // that no longer contained it, and the right-hand column would be clipped.
+  //
+  // The glyph slot is FreeType's own scratch, reloaded by the next
+  // FT_Load_Glyph, so translating it in place costs nothing and leaks nothing.
+  //
+  // 64/3 is not an integer in 26.6, so a third of a pixel rounds to 21/64 and
+  // two thirds to 43/64 — under a hundredth of a pixel from the ideal, which is
+  // an order of magnitude finer than the half-pixel error this exists to remove
+  // and far below the rasterizer's own +/-2/255.
+  if (phase != 0) {
+    const FT_Pos dx =
+        (FT_Pos)((phase * 64 + vfe::cellkey::kPhaseCount / 2) /
+                 vfe::cellkey::kPhaseCount);
+    FT_Outline_Translate(&ol, dx, 0);
+  }
 
   // The cell, grid-fitted the way FreeType's rasterizer does: the bitmap
   // covers whole pixels from floor(min) to ceil(max). Matching this is what

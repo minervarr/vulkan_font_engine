@@ -177,34 +177,47 @@ size_t RasterFont::texelOffset(uint32_t page, uint32_t x, uint32_t y) const {
   return (size_t)page * kPageW * kPageH + (size_t)y * kPageW + x;
 }
 
+// The serial one-cell bake, used by the miss path.
+//
+// It runs the SAME two steps the batched path does — extract the outline at
+// this phase, then rasterize it — rather than FreeType's scan conversion. That
+// is not tidiness: a cell reached through a miss is the same cell ensureGlyphs
+// would have baked, so if the two used different rasterizers the identical
+// glyph would look subtly different depending on which route happened to
+// produce it, and which route that is depends on window size and scroll
+// position. Nothing would look broken; text would just be inconsistent with
+// itself in a way no test would catch.
 bool RasterFont::bakeCell(const Face& f, FontStyle style, int sizePx,
-                          uint32_t cp) {
-  vfe::RasterGlyph g;
-  if (!f.raster.render(cp, sizePx, g)) return false;
+                          uint32_t cp, uint32_t phase) {
+  vfe::OutlineGlyph o;
+  if (!f.raster.outline(cp, sizePx, o, phase)) return false;
 
   Cell c;
-  c.advance  = g.advance;
-  c.bearingX = g.bearingX;
-  c.bearingY = g.bearingY;
+  c.advance  = o.advance;
+  c.bearingX = o.bearingX;
+  c.bearingY = o.bearingY;
 
-  if (g.w > 0 && g.h > 0) {
+  if (o.w > 0 && o.h > 0) {
+    std::vector<uint8_t> cov;
+    vfe::areaRasterize(o.edges, o.w, o.h, cov);
+
     vfe::ShelfPacker::Slot slot;
-    if (!packInto(g.w, g.h, slot)) return false;
+    if (!packInto(o.w, o.h, slot)) return false;
     c.hasGlyph = true;
     c.page   = slot.page;
     c.atlasX = slot.x;
     c.atlasY = slot.y;
-    c.w = g.w;
-    c.h = g.h;
-    for (int y = 0; y < g.h; ++y) {
+    c.w = o.w;
+    c.h = o.h;
+    for (int y = 0; y < o.h; ++y) {
       std::memcpy(atlas_.data() + texelOffset(c.page, c.atlasX, c.atlasY + y),
-                  g.cov.data() + (size_t)y * g.w, (size_t)g.w);
+                  cov.data() + (size_t)y * o.w, (size_t)o.w);
     }
   }
   // else: whitespace. Recorded with hasGlyph=false so layout advances the pen
   // without emitting a quad — the same contract MsdfGlyph::hasGlyph carries.
 
-  cells_.emplace(cellKey(style, sizePx, cp), c);
+  cells_.emplace(cellKey(style, sizePx, cp, phase), c);
   return true;
 }
 
@@ -306,7 +319,7 @@ void RasterFont::rasterizeJobs(BakeJob* jobs, size_t count) {
       const vfe::RasterFace* r = &j.face->bakeFaces[w];
       if (!r->isOpen()) r = &j.face->raster;
       if (gpuBake_) {
-        j.ok = r->outline(j.cp, j.sizePx, j.outline);
+        j.ok = r->outline(j.cp, j.sizePx, j.outline, j.phase);
         continue;
       }
       // The CPU path runs the SAME two steps the GPU one does — extract the
@@ -316,7 +329,7 @@ void RasterFont::rasterizeJobs(BakeJob* jobs, size_t count) {
       // produce the same pixels, so MATRIX_GPU_GLYPHS is a performance switch
       // rather than a look switch.
       vfe::OutlineGlyph o;
-      if (!r->outline(j.cp, j.sizePx, o)) continue;
+      if (!r->outline(j.cp, j.sizePx, o, j.phase)) continue;
       j.glyph.w = o.w;
       j.glyph.h = o.h;
       j.glyph.bearingX = o.bearingX;
@@ -362,7 +375,7 @@ bool RasterFont::commitGpuJob(BakeJob& job) {
     g.page = slot.page; g.x = slot.x; g.y = slot.y;
     gpuCells_.push_back(std::move(g));
   }
-  cells_.emplace(cellKey(job.style, job.sizePx, job.cp), c);
+  cells_.emplace(cellKey(job.style, job.sizePx, job.cp, job.phase), c);
   return true;
 }
 
@@ -391,7 +404,7 @@ bool RasterFont::commitJob(BakeJob& job) {
   // else: whitespace, recorded with hasGlyph=false so layout advances the pen
   // without emitting a quad.
 
-  cells_.emplace(cellKey(job.style, job.sizePx, job.cp), c);
+  cells_.emplace(cellKey(job.style, job.sizePx, job.cp, job.phase), c);
   return true;
 }
 
@@ -431,13 +444,20 @@ int RasterFont::ensureGlyphs(const std::vector<uint32_t>& cps,
       if (!use) continue;
 
       for (int sz : sizes_) {
-        if (cells_.count(cellKey((FontStyle)style, sz, cp))) continue;
-        BakeJob j;
-        j.face = use;
-        j.style = (FontStyle)style;
-        j.sizePx = sz;
-        j.cp = cp;
-        jobs.push_back(std::move(j));
+        // Every subpixel phase this size is baked at — one cell each, and the
+        // count depends on the size (see phaseCount(): the phases earn their
+        // memory on small text and stop earning it on large).
+        const uint32_t phases = phaseCount(sz);
+        for (uint32_t ph = 0; ph < phases; ++ph) {
+          if (cells_.count(cellKey((FontStyle)style, sz, cp, ph))) continue;
+          BakeJob j;
+          j.face = use;
+          j.style = (FontStyle)style;
+          j.sizePx = sz;
+          j.cp = cp;
+          j.phase = ph;
+          jobs.push_back(std::move(j));
+        }
       }
     }
   }
@@ -499,10 +519,11 @@ int RasterFont::bakeMisses() {
     const FontStyle style = f.style;
     const int       sz    = (int)f.sizePx;
     const uint32_t  cp    = f.cp;
+    const uint32_t  phase = f.phase;
 
     const Face* use = faceFor(style, cp);
     if (!use || sz <= 0) { unservable_.insert(k); continue; }
-    if (bakeCell(*use, style, sz, cp)) {
+    if (bakeCell(*use, style, sz, cp, phase)) {
       added++;
     } else {
       unservable_.insert(k);
@@ -520,9 +541,19 @@ int RasterFont::bakeMisses() {
 // ── Layout ──────────────────────────────────────────────────────────────────
 //
 // The pen stays in float so kerned advances accumulate exactly; only the
-// POSITION a quad is emitted at is rounded. That is what keeps textWidth()
+// POSITION a quad is emitted at is quantized. That is what keeps textWidth()
 // and the emitters in agreement — they add the same numbers in the same
-// order, and the rounding never feeds back into the pen.
+// order, and the quantization never feeds back into the pen.
+//
+// HORIZONTALLY that quantization is now to a third of a pixel rather than a
+// whole one: snapPen() splits the pen into the texel the cell is blitted at and
+// the phase it was baked at, and the phase carries the remaining fraction as
+// ink shifted inside the cell. See cellkey::kPhaseCount for why three.
+//
+// VERTICALLY it is still a whole pixel, and that asymmetry is deliberate: one
+// baseline serves every glyph on the line, so rounding it moves them all
+// together and there is no relative error to remove. Horizontal snapping was
+// different precisely because each glyph rounded independently.
 
 float RasterFont::layoutByKey(uint32_t key, float penX, float baselineY,
                               float sizePx, GlyphQuad& q) const {
@@ -531,11 +562,17 @@ float RasterFont::layoutByKey(uint32_t key, float penX, float baselineY,
 
   const FontStyle style = keyStyle(key);
   const uint32_t  cp    = keyCp(key);
-  const Cell* c = find(style, quantize(sizePx), cp);
+  const int       px    = quantize(sizePx);
+
+  float    snappedX = 0.0f;
+  uint32_t phase    = 0;
+  snapPen(penX, px, snappedX, phase);
+
+  const Cell* c = find(style, px, cp, phase);
   if (!c) return penX;
 
   if (c->hasGlyph) {
-    const float x = std::round(penX)      + (float)c->bearingX;
+    const float x = snappedX              + (float)c->bearingX;
     const float y = std::round(baselineY) - (float)c->bearingY;
     q.x0 = x;             q.y0 = y;
     q.x1 = x + (float)c->w; q.y1 = y + (float)c->h;

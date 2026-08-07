@@ -72,6 +72,43 @@ int main() {
     std::printf("[3] distinct inputs, distinct keys\n");
   }
 
+  // ── [3b] The phase field, held to the same standard ─────────────────────
+  //
+  // Exhaustive over every (style, size, phase): the phase is the newest field
+  // and therefore the one a later edit is most likely to give an overlapping
+  // position. The failure mode is not subtle in its consequences and is
+  // completely invisible in its symptoms — a phase leaking into the size field
+  // asks FreeType for a nonsense bake (that is the 50-million-pixel bug again,
+  // in a new field), and a phase that collapses into another cell makes three
+  // bakes silently share one slot, which just looks like the old whole-pixel
+  // snapping nobody could see was wrong in the first place.
+  {
+    int n = 0;
+    for (int s = 0; s < kFontStyleCount; ++s) {
+      for (uint32_t sz = 1; sz <= kMaxCellPx; ++sz) {
+        for (uint32_t ph = 0; ph < kPhaseCount; ++ph) {
+          const FontStyle style = FontStyle(s);
+          const CellFields f = decodeCell(encodeCell(style, sz, 0x4E2D, ph));
+          assert(f.style == style);
+          assert(f.sizePx == sz);
+          assert(f.cp == 0x4E2D);
+          assert(f.phase == ph);
+          ++n;
+        }
+        // Every phase of one cell is a DIFFERENT key. Without this the whole
+        // feature is a no-op that still pays for itself in atlas memory.
+        for (uint32_t a = 0; a < kPhaseCount; ++a)
+          for (uint32_t b = a + 1; b < kPhaseCount; ++b)
+            assert(encodeCell(FontStyle(s), sz, 0x41, a) !=
+                   encodeCell(FontStyle(s), sz, 0x41, b));
+      }
+    }
+    // An omitted phase means phase 0 — what every advance query relies on.
+    assert(encodeCell(FontStyle::Bold, 22, 0x41) ==
+           encodeCell(FontStyle::Bold, 22, 0x41, 0));
+    std::printf("[3b] phase round-trip and independence: %d combinations\n", n);
+  }
+
   // ── [4] Glyph key: zero means "no key", and nothing valid collides ──────
   //
   // canvas.cc tests `key == 0` on every text call, and keyForStyle() returns 0

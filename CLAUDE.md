@@ -31,7 +31,14 @@ pwsh tools/coverage_test/build.ps1
 - CMake 3.22.1+
 - FreeType and msdfgen — vendored as submodules under `third_party/` (init submodules first)
 - Slang compiler (`slangc`) from the Vulkan SDK — resolved from `$VULKAN_SDK` (override with `-DVFE_SLANGC=...`); required for recompiling shaders
-- Tests: `tools/coverage_test` (CPU port of the tiling/coverage shaders) and `core/tests/gpos_kern_test.cc` (GPOS kern extraction, Debug-only, links `gpos_kern.cc` alone — no FreeType/msdfgen/Vulkan). Everything else is manual/visual (the Android demo)
+- Tests: `tools/coverage_test` (CPU port of the tiling/coverage shaders), plus six Debug-only `assert()` executables under `core/tests/`. Each links the narrowest set of sources that can answer its question — that is the convention, not an accident, and it is what keeps them runnable without a GPU:
+  - `gpos_kern_test` — GPOS kern extraction. Links `gpos_kern.cc` alone
+  - `cell_key_test`, `shelf_packer_test` — link NOTHING; both headers are self-contained so the cache's key packing and shelf bookkeeping are checkable as arithmetic
+  - `glyph_raster_test` — the FreeType wrapper. Links `glyph_raster.cc` + FreeType
+  - `area_raster_test` — the quality gate for `area_raster.hh`, measured against FreeType glyph by glyph, plus the subpixel-phase check. Same linkage as above
+  - `raster_font_test` — the cache's positional fidelity: how far a drawn glyph lands from where the pen said. Needs the real `RasterFont`, so it also links `raster_font.cc` + `gpos_kern.cc`
+
+  All take the fonts directory as `argv[1]` and `return 77` when the assets are not there. Rendering itself is still manual/visual (the Android demo)
 
 ## Shader Compilation
 
