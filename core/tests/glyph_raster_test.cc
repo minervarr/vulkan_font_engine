@@ -14,6 +14,7 @@
 #undef NDEBUG
 #include <cassert>
 
+#include "../cell_key.hh"
 #include "../glyph_raster.hh"
 
 #include <cmath>
@@ -268,6 +269,58 @@ int main(int argc, char** argv) {
     vfe::RasterGlyph g;
     assert(b.render('A', 16, g));
     std::printf("[7] move leaves the source closed and the target usable\n");
+  }
+
+  // ── [8] outlinePhases() == outline(), phase for phase ────────────────────
+  //
+  // outlinePhases() exists purely to avoid re-parsing the same charstring once
+  // per phase — FT_Load_Glyph is 71% of outline extraction, which is itself
+  // ~80% of the bake. It is a PERFORMANCE change with no licence to alter a
+  // single coordinate, so this compares the two APIs exactly: same box, same
+  // metrics, same edge count, same floats bit for bit.
+  //
+  // The risk it guards is specific. outlinePhases() walks the phases by
+  // TRANSLATING the slot in place and accumulating deltas, where outline()
+  // reloads and translates once from zero. Those agree only because 26.6
+  // offsets are exact integers; if kPhaseCount ever became something whose
+  // offsets did not divide evenly, the accumulated path would drift away from
+  // the direct one and every phase but the first would land slightly wrong.
+  {
+    vfe::RasterFace f;
+    assert(openFile(f, dir + "/newcomputermodern/NewCM10-Regular.otf"));
+    const uint32_t n = vfe::cellkey::kPhaseCount;
+    long compared = 0, edges = 0;
+    for (uint32_t cp : {0x41u, 0x48u, 0x67u, 0x69u, 0x6Fu, 0x2Eu, 0x40u, 0x57u}) {
+      for (int sz : {8, 12, 18, 24, 37, 48, 96}) {
+        std::vector<vfe::OutlineGlyph> got(n);
+        if (!f.outlinePhases(cp, sz, got.data(), n)) continue;
+        for (uint32_t ph = 0; ph < n; ++ph) {
+          vfe::OutlineGlyph want;
+          assert(f.outline(cp, sz, want, ph));
+          assert(got[ph].w == want.w);
+          assert(got[ph].h == want.h);
+          assert(got[ph].bearingX == want.bearingX);
+          assert(got[ph].bearingY == want.bearingY);
+          assert(got[ph].advance  == want.advance);
+          assert(got[ph].edges.size() == want.edges.size());
+          for (size_t e = 0; e < want.edges.size(); ++e) {
+            // Bit-for-bit. Not a tolerance: the same arithmetic on the same
+            // integers must give the same floats, and anything else means the
+            // two paths have genuinely diverged.
+            assert(got[ph].edges[e].x0 == want.edges[e].x0);
+            assert(got[ph].edges[e].y0 == want.edges[e].y0);
+            assert(got[ph].edges[e].x1 == want.edges[e].x1);
+            assert(got[ph].edges[e].y1 == want.edges[e].y1);
+          }
+          edges += (long)want.edges.size();
+          compared++;
+        }
+      }
+    }
+    std::printf("[8] outlinePhases == outline: %ld phase-glyphs, %ld edges identical\n",
+                compared, edges);
+    assert(compared >= 100);
+    assert(edges > 10000);
   }
 
   std::printf("glyph_raster_test: all checks passed\n");

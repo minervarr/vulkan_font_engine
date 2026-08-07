@@ -310,9 +310,21 @@ class RasterFont : public TextFont {
     FontStyle   style = FontStyle::Roman;
     int         sizePx = 0;
     uint32_t    cp = 0;
-    uint32_t    phase = 0;
-    vfe::RasterGlyph glyph;
-    vfe::OutlineGlyph outline;   // GPU mode fills this instead
+
+    // ALL of this glyph's phases at this size, in one job.
+    //
+    // One job per phase would mean one FT_Load_Glyph per phase — the same
+    // charstring parsed three times to produce three outlines that differ only
+    // by a sub-pixel shift. That parse is the bake's single largest cost (71%
+    // of outline extraction, which is itself ~80% of the bake), so the phases
+    // are batched here and served by one RasterFace::outlinePhases() call.
+    //
+    // Round-robin scheduling in rasterizeJobs() is also why this has to be one
+    // JOB rather than three adjacent ones: adjacent jobs go to different
+    // workers, so there would be nothing to reuse.
+    uint32_t    nPhases = 1;
+    vfe::RasterGlyph  glyph[vfe::cellkey::kPhaseCount];
+    vfe::OutlineGlyph outline[vfe::cellkey::kPhaseCount];   // GPU mode instead
     bool        ok = false;
   };
 
@@ -332,8 +344,10 @@ class RasterFont : public TextFont {
   // Place and store one rasterized job. Serial by necessity — the shelf packer
   // is a single allocator, and commit ORDER is what keeps the atlas layout
   // deterministic for a given input.
-  bool commitJob(BakeJob& job);
-  bool commitGpuJob(BakeJob& job);
+  // Both return the number of CELLS committed — a job now carries up to
+  // kPhaseCount of them.
+  int commitJob(BakeJob& job);
+  int commitGpuJob(BakeJob& job);
 
   // Both key codecs live in cell_key.hh, where the field positions are derived
   // from declared widths and the round-trips are proved with static_assert.

@@ -395,7 +395,7 @@ void RasterFont::rasterizeJobs(BakeJob* jobs, size_t count) {
       const vfe::RasterFace* r = &j.face->bakeFaces[w];
       if (!r->isOpen()) r = &j.face->raster;
       if (gpuBake_) {
-        j.ok = r->outline(j.cp, j.sizePx, j.outline, j.phase);
+        j.ok = r->outlinePhases(j.cp, j.sizePx, j.outline, j.nPhases);
         continue;
       }
       // The CPU path runs the SAME two steps the GPU one does — extract the
@@ -404,15 +404,18 @@ void RasterFont::rasterizeJobs(BakeJob* jobs, size_t count) {
       // quarter pixel) on the default path, and it also makes the two paths
       // produce the same pixels, so MATRIX_GPU_GLYPHS is a performance switch
       // rather than a look switch.
-      vfe::OutlineGlyph o;
-      if (!r->outline(j.cp, j.sizePx, o, j.phase)) continue;
-      j.glyph.w = o.w;
-      j.glyph.h = o.h;
-      j.glyph.bearingX = o.bearingX;
-      j.glyph.bearingY = o.bearingY;
-      j.glyph.advance  = o.advance;
-      if (o.w > 0 && o.h > 0)
-        vfe::areaRasterize(o.edges, o.w, o.h, j.glyph.cov, scratch[w]);
+      vfe::OutlineGlyph o[vfe::cellkey::kPhaseCount];
+      if (!r->outlinePhases(j.cp, j.sizePx, o, j.nPhases)) continue;
+      for (uint32_t ph = 0; ph < j.nPhases; ++ph) {
+        j.glyph[ph].w = o[ph].w;
+        j.glyph[ph].h = o[ph].h;
+        j.glyph[ph].bearingX = o[ph].bearingX;
+        j.glyph[ph].bearingY = o[ph].bearingY;
+        j.glyph[ph].advance  = o[ph].advance;
+        if (o[ph].w > 0 && o[ph].h > 0)
+          vfe::areaRasterize(o[ph].edges, o[ph].w, o[ph].h, j.glyph[ph].cov,
+                             scratch[w]);
+      }
       j.ok = true;
     }
   };
@@ -432,56 +435,71 @@ void RasterFont::rasterizeJobs(BakeJob* jobs, size_t count) {
 // later by the compute passes. Everything about the PLACEMENT is identical to
 // the CPU path — same packer, same order — so the atlas layout does not depend
 // on which rasterizer made it.
-bool RasterFont::commitGpuJob(BakeJob& job) {
-  if (!job.ok) return false;
+int RasterFont::commitGpuJob(BakeJob& job) {
+  if (!job.ok) return 0;
+  int added = 0;
 
-  Cell c;
-  c.advance  = job.outline.advance;
-  c.bearingX = job.outline.bearingX;
-  c.bearingY = job.outline.bearingY;
+  for (uint32_t ph = 0; ph < job.nPhases; ++ph) {
+    const uint64_t key = cellKey(job.style, job.sizePx, job.cp, ph);
+    if (cells_.count(key)) continue;   // a previous pass already placed it
 
-  if (job.outline.w > 0 && job.outline.h > 0) {
-    vfe::ShelfPacker::Slot slot;
-    if (!packInto(job.outline.w, job.outline.h, slot)) return false;
-    c.hasGlyph = true;
-    c.page = slot.page; c.atlasX = slot.x; c.atlasY = slot.y;
-    c.w = job.outline.w; c.h = job.outline.h;
-    GpuCell g;
-    g.glyph = std::move(job.outline);
-    g.page = slot.page; g.x = slot.x; g.y = slot.y;
-    gpuCells_.push_back(std::move(g));
+    vfe::OutlineGlyph& o = job.outline[ph];
+    Cell c;
+    c.advance  = o.advance;
+    c.bearingX = o.bearingX;
+    c.bearingY = o.bearingY;
+
+    if (o.w > 0 && o.h > 0) {
+      vfe::ShelfPacker::Slot slot;
+      if (!packInto(o.w, o.h, slot)) continue;
+      c.hasGlyph = true;
+      c.page = slot.page; c.atlasX = slot.x; c.atlasY = slot.y;
+      c.w = o.w; c.h = o.h;
+      GpuCell g;
+      g.glyph = std::move(o);
+      g.page = slot.page; g.x = slot.x; g.y = slot.y;
+      gpuCells_.push_back(std::move(g));
+    }
+    cells_.emplace(key, c);
+    added++;
   }
-  cells_.emplace(cellKey(job.style, job.sizePx, job.cp, job.phase), c);
-  return true;
+  return added;
 }
 
-bool RasterFont::commitJob(BakeJob& job) {
-  if (!job.ok) return false;
+int RasterFont::commitJob(BakeJob& job) {
+  if (!job.ok) return 0;
+  int added = 0;
 
-  Cell c;
-  c.advance  = job.glyph.advance;
-  c.bearingX = job.glyph.bearingX;
-  c.bearingY = job.glyph.bearingY;
+  for (uint32_t ph = 0; ph < job.nPhases; ++ph) {
+    const uint64_t key = cellKey(job.style, job.sizePx, job.cp, ph);
+    if (cells_.count(key)) continue;   // a previous pass already placed it
 
-  if (job.glyph.w > 0 && job.glyph.h > 0) {
-    vfe::ShelfPacker::Slot slot;
-    if (!packInto(job.glyph.w, job.glyph.h, slot)) return false;
-    c.hasGlyph = true;
-    c.page   = slot.page;
-    c.atlasX = slot.x;
-    c.atlasY = slot.y;
-    c.w = job.glyph.w;
-    c.h = job.glyph.h;
-    for (int y = 0; y < job.glyph.h; ++y)
-      std::memcpy(atlas_.data() + texelOffset(c.page, c.atlasX, c.atlasY + y),
-                  job.glyph.cov.data() + (size_t)y * job.glyph.w,
-                  (size_t)job.glyph.w);
+    const vfe::RasterGlyph& g = job.glyph[ph];
+    Cell c;
+    c.advance  = g.advance;
+    c.bearingX = g.bearingX;
+    c.bearingY = g.bearingY;
+
+    if (g.w > 0 && g.h > 0) {
+      vfe::ShelfPacker::Slot slot;
+      if (!packInto(g.w, g.h, slot)) continue;
+      c.hasGlyph = true;
+      c.page   = slot.page;
+      c.atlasX = slot.x;
+      c.atlasY = slot.y;
+      c.w = g.w;
+      c.h = g.h;
+      for (int y = 0; y < g.h; ++y)
+        std::memcpy(atlas_.data() + texelOffset(c.page, c.atlasX, c.atlasY + y),
+                    g.cov.data() + (size_t)y * g.w, (size_t)g.w);
+    }
+    // else: whitespace, recorded with hasGlyph=false so layout advances the pen
+    // without emitting a quad.
+
+    cells_.emplace(key, c);
+    added++;
   }
-  // else: whitespace, recorded with hasGlyph=false so layout advances the pen
-  // without emitting a quad.
-
-  cells_.emplace(cellKey(job.style, job.sizePx, job.cp, job.phase), c);
-  return true;
+  return added;
 }
 
 int RasterFont::ensureGlyphs(const std::vector<uint32_t>& cps,
@@ -520,20 +538,27 @@ int RasterFont::ensureGlyphs(const std::vector<uint32_t>& cps,
       if (!use) continue;
 
       for (int sz : sizes_) {
-        // Every subpixel phase this size is baked at — one cell each, and the
-        // count depends on the size (see phaseCount(): the phases earn their
-        // memory on small text and stop earning it on large).
+        // ONE job for all of this size's phases (see phaseCount(): the phases
+        // earn their memory on small text and stop earning it on large). They
+        // travel together because they share a FreeType load, which is the
+        // bake's dominant cost — see BakeJob::nPhases.
+        //
+        // The job is planned when ANY phase is missing and re-emits all of
+        // them; commitJob() skips the ones already placed. Loading once and
+        // discarding a phase costs far less than a second load would.
         const uint32_t phases = phaseCount(sz);
-        for (uint32_t ph = 0; ph < phases; ++ph) {
-          if (cells_.count(cellKey((FontStyle)style, sz, cp, ph))) continue;
-          BakeJob j;
-          j.face = use;
-          j.style = (FontStyle)style;
-          j.sizePx = sz;
-          j.cp = cp;
-          j.phase = ph;
-          jobs.push_back(std::move(j));
-        }
+        bool anyMissing = false;
+        for (uint32_t ph = 0; ph < phases && !anyMissing; ++ph)
+          anyMissing = !cells_.count(cellKey((FontStyle)style, sz, cp, ph));
+        if (!anyMissing) continue;
+
+        BakeJob j;
+        j.face = use;
+        j.style = (FontStyle)style;
+        j.sizePx = sz;
+        j.cp = cp;
+        j.nPhases = phases;
+        jobs.push_back(std::move(j));
       }
     }
   }
@@ -556,9 +581,9 @@ int RasterFont::ensureGlyphs(const std::vector<uint32_t>& cps,
     const size_t n = std::min(kBakeBatch, jobs.size() - base);
     rasterizeJobs(jobs.data() + base, n);
     for (size_t i = 0; i < n; ++i) {
-      if (gpuBake_ ? commitGpuJob(jobs[base + i]) : commitJob(jobs[base + i]))
-        added++;
-      jobs[base + i].glyph = vfe::RasterGlyph{};   // release the coverage bytes
+      added += gpuBake_ ? commitGpuJob(jobs[base + i]) : commitJob(jobs[base + i]);
+      for (uint32_t ph = 0; ph < vfe::cellkey::kPhaseCount; ++ph)
+        jobs[base + i].glyph[ph] = vfe::RasterGlyph{};   // release coverage bytes
     }
   }
 

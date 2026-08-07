@@ -108,6 +108,27 @@ class RasterFace {
   bool outline(uint32_t cp, int sizePx, OutlineGlyph& out,
                uint32_t phase = 0) const;
 
+  // Every phase of one glyph, from ONE FreeType load.
+  //
+  // outline() loads the glyph each time it is called, and the bake calls it
+  // once per phase — so the same charstring is parsed kPhaseCount times to
+  // produce kPhaseCount outlines that differ only by a sub-pixel translation.
+  //
+  // That parse is the bake's largest single cost. Measured over the app's
+  // faces at four sizes and three phases: FT_Load_Glyph is 71% of outline
+  // extraction and the decompose/flatten only 29% — and extraction is in turn
+  // ~80% of the whole bake, dwarfing the scan conversion a GPU could take.
+  //
+  // Results are bit-identical to calling outline() per phase, because that is
+  // literally what this does after the load: translate the slot's outline by
+  // the phase delta, then decompose. The translations are exact 26.6 integer
+  // adds, so phase p's geometry here and there are the same numbers.
+  //
+  // `out` must have room for `nPhases` entries. Returns false if the glyph is
+  // absent, exactly like outline().
+  bool outlinePhases(uint32_t cp, int sizePx, OutlineGlyph* out,
+                     uint32_t nPhases) const;
+
   // Vertical metrics as EM fractions, straight from the face's design units.
   //
   // Use THIS, not verticalMetrics(), for anything that must scale exactly.
@@ -135,6 +156,11 @@ class RasterFace {
   }
 
  private:
+  // Grid-fit the loaded slot's outline and flatten it. `facePtr` is the FT_Face
+  // as void*, kept opaque here for the same reason face_ is. Static because it
+  // reads nothing but the slot it is handed.
+  static bool emitFromSlot(void* facePtr, OutlineGlyph& out);
+
   bool openBytes();
   void close();
 

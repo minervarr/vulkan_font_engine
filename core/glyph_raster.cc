@@ -280,6 +280,15 @@ int cbCubic(const FT_Vector* c1, const FT_Vector* c2, const FT_Vector* to,
   return 0;
 }
 
+// A phase's horizontal offset, in 26.6. Defined once because outline() and
+// outlinePhases() must agree on it exactly — the latter walks the phases by
+// DIFFERENCES of this function, so any disagreement would put the two APIs'
+// phase p in different places.
+FT_Pos phaseOffset26_6(uint32_t phase) {
+  return (FT_Pos)((phase * 64 + vfe::cellkey::kPhaseCount / 2) /
+                  vfe::cellkey::kPhaseCount);
+}
+
 }  // namespace
 
 bool RasterFace::outline(uint32_t cp, int sizePx, OutlineGlyph& out,
@@ -317,12 +326,56 @@ bool RasterFace::outline(uint32_t cp, int sizePx, OutlineGlyph& out,
   // two thirds to 43/64 — under a hundredth of a pixel from the ideal, which is
   // an order of magnitude finer than the half-pixel error this exists to remove
   // and far below the rasterizer's own +/-2/255.
-  if (phase != 0) {
-    const FT_Pos dx =
-        (FT_Pos)((phase * 64 + vfe::cellkey::kPhaseCount / 2) /
-                 vfe::cellkey::kPhaseCount);
-    FT_Outline_Translate(&ol, dx, 0);
+  if (phase != 0) FT_Outline_Translate(&ol, phaseOffset26_6(phase), 0);
+
+  return emitFromSlot(f, out);
+}
+
+// Everything from the grid-fitted box onward, for a slot whose outline is
+// already loaded and already translated to the phase being emitted. Shared by
+// outline() and outlinePhases() so the two cannot drift.
+bool RasterFace::outlinePhases(uint32_t cp, int sizePx, OutlineGlyph* out,
+                               uint32_t nPhases) const {
+  if (!out || nPhases == 0) return false;
+  for (uint32_t p = 0; p < nPhases; ++p) out[p] = OutlineGlyph{};
+  if (!face_ || sizePx <= 0) return false;
+  if ((uint32_t)sizePx > kMaxRenderPx) return false;
+  if (nPhases > vfe::cellkey::kPhaseCount) return false;
+
+  FT_Face f = face(face_);
+  const FT_UInt gid = FT_Get_Char_Index(f, (FT_ULong)cp);
+  if (gid == 0) return false;
+  if (FT_Set_Pixel_Sizes(f, 0, (FT_UInt)sizePx) != 0) return false;
+
+  // THE ONE LOAD. Everything below reuses the slot this filled — that is the
+  // entire point of this function.
+  if (FT_Load_Glyph(f, gid, FT_LOAD_NO_HINTING | FT_LOAD_TARGET_NORMAL) != 0)
+    return false;
+  if (f->glyph->format != FT_GLYPH_FORMAT_OUTLINE) return false;
+
+  const float advance = (float)f->glyph->advance.x * k26_6;
+  FT_Outline& ol = f->glyph->outline;
+
+  // Walk the phases by DIFFERENCES, translating the slot in place rather than
+  // reloading it. The offsets are exact 26.6 integers, so accumulating the
+  // deltas lands on phaseOffset26_6(p) precisely — phase p's outline here is
+  // the same integer coordinates outline(cp, sizePx, ., p) would have produced.
+  FT_Pos applied = 0;
+  for (uint32_t p = 0; p < nPhases; ++p) {
+    const FT_Pos want = phaseOffset26_6(p);
+    if (want != applied) {
+      FT_Outline_Translate(&ol, want - applied, 0);
+      applied = want;
+    }
+    out[p].advance = advance;   // phase-independent, by definition
+    if (!emitFromSlot(face_, out[p])) return false;
   }
+  return true;
+}
+
+bool RasterFace::emitFromSlot(void* facePtr, OutlineGlyph& out) {
+  FT_Face f = face(facePtr);
+  FT_Outline& ol = f->glyph->outline;
 
   // The cell, grid-fitted the way FreeType's rasterizer does: the bitmap
   // covers whole pixels from floor(min) to ceil(max). Matching this is what
