@@ -27,7 +27,15 @@ static const int TRANSFER_PQ  = 2;
     float hlg;
     int   transfer;
     float peakNits;
-    float _pad0;
+    // Quarter-turns CLOCKWISE to apply to the sampled image: 0, 1, 2 or 3.
+    //
+    // A camera preview needs 1 and always did; that used to be baked into
+    // composite_vert. A video file needs whatever its container says, which is
+    // usually 0 for something recorded landscape and 1 or 3 for portrait. A
+    // quadrant rather than an angle because this is a uv swizzle — free, exact,
+    // and resampling nothing. The consumer always pushes it, so there is no
+    // zero-init default to preserve here.
+    int   rotQuadrant;
 
     // How much of the sampled image is actually PICTURE.
     //
@@ -88,9 +96,17 @@ float3 linearToSrgb(float3 l) {
 
 [shader("fragment")]
 float4 main(float2 uv : TEXCOORD0) : SV_Target {
+    // Rotate first, in the unit square, then crop. The order matters: uvScale
+    // describes the picture's extent within the DECODER's buffer, which is a
+    // property of the texture and not of how it is being shown.
+    float2 r = uv;
+    if      (pc.rotQuadrant == 1) r = float2(uv.y, 1.0 - uv.x);
+    else if (pc.rotQuadrant == 2) r = float2(1.0 - uv.x, 1.0 - uv.y);
+    else if (pc.rotQuadrant == 3) r = float2(1.0 - uv.y, uv.x);
+
     float2 scale = float2(pc.uvScale.x > 0.0 ? pc.uvScale.x : 1.0,
                           pc.uvScale.y > 0.0 ? pc.uvScale.y : 1.0);
-    float4 s = inputImage.Sample(uv * scale);
+    float4 s = inputImage.Sample(r * scale);
     float3 c = s.rgb;
 
     // The legacy single-float contract: a consumer that pushes only `hlg` and
