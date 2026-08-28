@@ -1,3 +1,5 @@
+#include "output_encode.slang"
+
 [[vk::binding(0, 0)]] Sampler2D inputImage;
 
 // The external image arrives already in RGB: the sampler's
@@ -80,6 +82,9 @@ float4 main(float2 uv : TEXCOORD0) : SV_Target {
 
     if (transfer == TRANSFER_HLG) {
         c = linearToSrgb(hlgToLinear(c));
+        // ...and then fall through to the encode below, which is the identity
+        // on the SDR swapchain this path has always run on.
+        return float4(encodeUiColor(c), s.a);
     } else if (transfer == TRANSFER_PQ) {
         // To absolute luminance, then into the display's range. Values above
         // what the panel can show are compressed rather than clipped: clipping
@@ -91,11 +96,20 @@ float4 main(float2 uv : TEXCOORD0) : SV_Target {
         // operator is a decision to make against real content on a real panel,
         // not a default to guess at here.
         nits = nits / (1.0 + nits / peak);
-        c = nits / peak;
-        // NOT sRGB-encoded: on an HDR10 swapchain the engine's OUTPUT_ENCODE
-        // applies the ST 2084 OETF at the end. Encoding here as well would
-        // apply the curve twice.
+
+        // Hand LINEAR light to the engine's own encode, with 1.0 meaning
+        // `peak` nits. THIS is what was missing and what made an HDR10 file
+        // render as a black screen: output_encode.slang is included by
+        // image/shape/overlay/msdf and was never included here, so this stage
+        // wrote linear values into a swapchain whose colourspace says they are
+        // PQ code values. The panel then reads 0.1 linear as about 0.6 nits,
+        // and the whole picture collapses into black with no error anywhere.
+        return float4(encodeImageLinear(nits / peak, peak), s.a);
     }
 
-    return float4(c, s.a);
+    // SDR content. On an SDR swapchain encodeUiColor() is the identity, so the
+    // camera preview stays byte-for-byte what it was. On an HDR swapchain it
+    // carries the sRGB numbers into the target's space instead of leaving them
+    // to be misread, which is the same bug as above in its milder form.
+    return float4(encodeUiColor(c), s.a);
 }
