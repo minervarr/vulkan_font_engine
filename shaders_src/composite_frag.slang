@@ -27,7 +27,23 @@ static const int TRANSFER_PQ  = 2;
     float hlg;
     int   transfer;
     float peakNits;
-    float _pad;
+    float _pad0;
+
+    // How much of the sampled image is actually PICTURE.
+    //
+    // A hardware decoder allocates its buffers aligned up to whatever its
+    // hardware wants — a 2040x1530 video lands in a 2048x1536 buffer — and the
+    // 8 columns and 6 rows past the edge hold whatever the codec left there.
+    // Sampling 0..1 stretches that debris across the last millimetre of the
+    // right and bottom edges, which is precisely the artefact this fixes.
+    //
+    // Applied to the FINAL uv, in texture space, so it is unaffected by the
+    // rotation composite_vert applies for the camera.
+    //
+    // 0 means "not set" and is read as 1: a zero-initialized push block must
+    // keep meaning "sample the whole image" for consumers that never set it.
+    float2 uvScale;
+    float2 _pad1;
 } pc;
 
 // HLG inverse-OETF: encoded signal [0,1] -> scene-linear [0,1].
@@ -72,7 +88,9 @@ float3 linearToSrgb(float3 l) {
 
 [shader("fragment")]
 float4 main(float2 uv : TEXCOORD0) : SV_Target {
-    float4 s = inputImage.Sample(uv);
+    float2 scale = float2(pc.uvScale.x > 0.0 ? pc.uvScale.x : 1.0,
+                          pc.uvScale.y > 0.0 ? pc.uvScale.y : 1.0);
+    float4 s = inputImage.Sample(uv * scale);
     float3 c = s.rgb;
 
     // The legacy single-float contract: a consumer that pushes only `hlg` and
