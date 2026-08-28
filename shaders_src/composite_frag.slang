@@ -109,11 +109,27 @@ float4 main(float2 uv : TEXCOORD0) : SV_Target {
         // specular highlights is what makes HDR content read as flat and grey.
         float peak = max(pc.peakNits, 1.0);
         float3 nits = pqToLinear(c) * 10000.0;
-        // Reinhard with a knee at the display peak. Deliberately the simplest
-        // curve that is monotonic and preserves hue ordering; a better
-        // operator is a decision to make against real content on a real panel,
-        // not a default to guess at here.
-        nits = nits / (1.0 + nits / peak);
+
+        // Identity below the knee; a soft shoulder only above it.
+        //
+        // This was plain Reinhard, n/(1 + n/peak), and that is a fidelity loss
+        // applied to EVERY pixel: at a 1000-nit peak a 100-nit midtone comes
+        // out at 91. Nothing about a midtone needs compressing — only the
+        // highlights a display cannot reach do — so darkening the entire image
+        // by ~9% to handle them is exactly the wrong trade for a player whose
+        // job is to show the file.
+        //
+        // Below `knee` the value passes through UNCHANGED, so most of the
+        // picture is bit-accurate to what was graded. Above it, an exponential
+        // shoulder compresses toward `peak` asymptotically: continuous in value
+        // and slope at the knee (so no visible banding at the join), monotonic,
+        // and it never clips, which is what turns specular highlights into flat
+        // white blobs.
+        const float knee = 0.75;
+        float3 kneeNits = float3(peak * knee, peak * knee, peak * knee);
+        float3 headroom = float3(peak, peak, peak) - kneeNits;
+        float3 over = max(nits - kneeNits, 0.0);
+        nits = min(nits, kneeNits) + headroom * (1.0 - exp(-over / max(headroom, 1e-6)));
 
         // Hand LINEAR light to the engine's own encode, with 1.0 meaning
         // `peak` nits. THIS is what was missing and what made an HDR10 file
