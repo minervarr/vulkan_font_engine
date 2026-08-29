@@ -215,11 +215,32 @@ float4 main(float2 uv : TEXCOORD0) : SV_Target {
         // and slope at the knee (so no visible banding at the join), monotonic,
         // and it never clips, which is what turns specular highlights into flat
         // white blobs.
+        //
+        // Applied to the BRIGHTEST CHANNEL and used to scale all three, not
+        // applied to each channel on its own.
+        //
+        // Per channel it was a hue shift. A saturated highlight — a red brake
+        // light, a blue LED, low-sun skin — has one channel far above the knee
+        // and the others below it, so the bright one was compressed while the
+        // others passed through untouched. That moves the RATIOS between the
+        // channels, and the ratios are the hue and the saturation: the colour
+        // visibly drifts toward white as it gets brighter, worst on exactly
+        // the saturated highlights this curve exists to preserve.
+        //
+        // Scaling by one common ratio keeps r:g:b exactly as graded and
+        // changes only the intensity, which is the one thing a display that
+        // cannot reach the luminance is entitled to change.
         const float knee = 0.75;
-        float3 kneeNits = float3(peakN * knee, peakN * knee, peakN * knee);
-        float3 headroom = float3(peakN, peakN, peakN) - kneeNits;
-        float3 over = max(nits - kneeNits, 0.0);
-        nits = min(nits, kneeNits) + headroom * (1.0 - exp(-over / max(headroom, 1e-6)));
+        float kneeNits = peakN * knee;
+        float headroom = peakN - kneeNits;
+
+        float m = max(nits.r, max(nits.g, nits.b));
+        if (m > kneeNits) {
+            float over = m - kneeNits;
+            float rolled = kneeNits + headroom * (1.0 - exp(-over / max(headroom, 1e-6)));
+            // m > kneeNits > 0 here, so the divide is safe.
+            nits *= rolled / m;
+        }
 
         // Hand LINEAR light to the engine's own encode, with 1.0 meaning
         // `peakN` nits. THIS is what was missing and what made an HDR10 file
