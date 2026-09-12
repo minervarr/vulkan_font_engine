@@ -19,9 +19,9 @@ struct PushConstants {
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> push;
 
-static const uint TILE_STRIDE       = 97;    // 1 count + 96 curve indices per SDF tile
+static const uint TILE_STRIDE       = 257;   // 1 count + 256 curve indices per SDF tile
 static const uint WIND_STRIDE       = 257;   // 1 count + 256 winding indices per winding-tile
-static const uint MAX_PER_TILE      = 96u;   // must match tiling.slang + host
+static const uint MAX_PER_TILE      = 256u;  // must match tiling.slang + host
 // Raised from 64: a busy tile-row cell (many curve edges whose bounding
 // boxes' rightmost tile all fall in the same 16px column) can silently drop
 // registrations past capacity — the InterlockedAdd counter in tiling.slang
@@ -240,7 +240,7 @@ float4 shadePixel(uint px, uint py, float fpx, float fpy)
     uint n = min(count, MAX_PER_TILE);
 
     // Insertion-sort by curve index for painter's-algorithm ordering.
-    uint sortedCurves[96];
+    uint sortedCurves[256];
     for (uint si = 0u; si < n; si++) sortedCurves[si] = tiles[tileOffset + 1u + si];
     for (uint si = 1u; si < n; si++) {
       uint key = sortedCurves[si];
